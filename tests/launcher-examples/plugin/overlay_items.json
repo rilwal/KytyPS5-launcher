@@ -1,0 +1,29 @@
+{
+  "type": "overlay_items",
+  "items": [
+    {
+      "key": "slot",
+      "group": "",
+      "page": "",
+      "section": "Game",
+      "label": "Slot",
+      "help": "Which save-state slot to use.",
+      "kind": {
+        "Choice": {
+          "options": [
+            {
+              "value": "1",
+              "label": "Slot 1"
+            }
+          ]
+        }
+      },
+      "value": {
+        "Text": "1"
+      },
+      "default": {
+        "Text": "1"
+      }
+    }
+  ]
+}

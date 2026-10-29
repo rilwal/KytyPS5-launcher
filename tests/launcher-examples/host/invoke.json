@@ -1,0 +1,8 @@
+{
+  "type": "invoke",
+  "key": "slot",
+  "value": {
+    "Text": "2"
+  },
+  "game": 7
+}

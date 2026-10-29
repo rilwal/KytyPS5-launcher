@@ -61,7 +61,8 @@ the folder Kyty runs games in (the launcher uses the executable's folder).
 `kyty_emulator --launcher-self-test <game-launcher>/docs/plugin-api/examples` checks every message
 Kyty builds and reads against the launcher's examples, which the launcher regenerates from its own
 types. `launcher_session_tests` runs the same check when given that folder, plus unit tests of the
-trophy list and settings.
+trophy list and settings. CTest runs it against a copy of those examples in `tests/launcher-examples`,
+or a game-launcher checkout's when `KYTY_LAUNCHER_EXAMPLES_DIR` points at it.
 
 ## Not done yet
 

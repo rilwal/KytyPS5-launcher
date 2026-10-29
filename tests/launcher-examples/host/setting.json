@@ -1,0 +1,7 @@
+{
+  "type": "setting",
+  "key": "api_key",
+  "value": {
+    "Text": "0123456789ABCDEF"
+  }
+}

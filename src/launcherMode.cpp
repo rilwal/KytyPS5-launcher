@@ -37,8 +37,8 @@ static Launcher::Handlers MakeHandlers() {
 	Launcher::Handlers handlers;
 
 	handlers.quit = []() {
-		// The window loop saves the pipeline cache and exits. Before the window exists there is
-		// nothing to save.
+		// The window loop saves the pipeline cache and exits. One that arrives before the window
+		// exists ends the loop as soon as it starts.
 		LOGF("[Launcher] quit\n");
 		Libs::Graphics::WindowRequestQuit();
 	};

@@ -139,7 +139,18 @@ namespace {
 
 std::unique_ptr<WindowContext> g_window;
 
+std::atomic_bool g_launcher_paused = false;
+std::atomic_bool g_launcher_quit   = false;
+
 } // namespace
+
+bool LauncherPaused() noexcept {
+	return g_launcher_paused.load(std::memory_order_acquire);
+}
+
+bool LauncherQuitRequested() noexcept {
+	return g_launcher_quit.load(std::memory_order_acquire);
+}
 
 constexpr const char* KYTY_SDL_WINDOW_CAPTION = "Game";
 
@@ -746,7 +757,8 @@ void WindowContext::Run() {
 	timer.Start();
 
 	loop.event     = {};
-	loop.need_exit = false;
+	// A quit the launcher sent before the window existed ends the loop at once.
+	loop.need_exit = LauncherQuitRequested();
 	loop.paused.store(false, std::memory_order_release);
 
 	constexpr uint64_t title_interval_ms = 1000;
@@ -826,20 +838,18 @@ void WindowContext::SendLauncherReady() {
 }
 
 void WindowRequestQuit() {
+	g_launcher_quit.store(true, std::memory_order_release);
+	// Before the window exists SDL's event queue isn't running; WindowContext::Run() reads the
+	// flag when it starts.
 	SDL_Event event {};
 	event.type = SDL_EVENT_QUIT;
-	if (!SDL_PushEvent(&event)) {
-		LOGF("Could not request quit: %s\n", SDL_GetError());
-	}
+	SDL_PushEvent(&event);
 }
 
 void WindowSetLauncherPaused(bool paused) {
-	if (g_window == nullptr) {
-		return;
-	}
 	LOGF("Launcher pause: %s\n", paused ? "true" : "false");
-	g_window->loop.launcher_paused.store(paused, std::memory_order_release);
-	// Wake the window loop so its timer follows at once.
+	g_launcher_paused.store(paused, std::memory_order_release);
+	// Wake the window loop, if it runs, so its timer follows at once.
 	SDL_Event event {};
 	event.type = SDL_EVENT_USER;
 	SDL_PushEvent(&event);

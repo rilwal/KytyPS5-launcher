@@ -413,13 +413,14 @@ void Session::Reader() {
 
 	// Nothing more will come, so boot needn't wait for configure.
 	std::lock_guard lock(m_configure_mutex);
+	m_reader_done = true;
 	m_configure_cv.notify_all();
 }
 
 std::optional<ConfigureValues> Session::WaitForConfigure(std::chrono::milliseconds timeout) {
 	std::unique_lock lock(m_configure_mutex);
 	if (!m_configure_cv.wait_until(lock, m_connected_at + timeout,
-	                               [this]() { return m_configure.has_value(); })) {
+	                               [this]() { return m_configure.has_value() || m_reader_done; })) {
 		LOGF("[Launcher] no configure; using Kyty's own options\n");
 	}
 	m_configure_taken = true;

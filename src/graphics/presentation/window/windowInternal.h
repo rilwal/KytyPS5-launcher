@@ -23,18 +23,21 @@ struct SurfaceCapabilities {
 	std::vector<vk::PresentModeKHR>   present_modes;
 };
 
+// The launcher's quick menu is open (launcher mode); kept apart from the OS pausing the app, and
+// outside WindowContext so the launcher can set it before the window exists or after it's gone.
+[[nodiscard]] bool LauncherPaused() noexcept;
+// The launcher asked Kyty to quit, maybe before the window existed.
+[[nodiscard]] bool LauncherQuitRequested() noexcept;
+
 struct WindowLoopState {
 	SDL_Event        event {};
 	bool             need_exit = false;
 	std::atomic_bool paused    = false;
-	// The launcher's quick menu is open (launcher mode); kept apart from the OS pausing the app
-	std::atomic_bool launcher_paused = false;
 	bool             launcher_ready_sent = false;
 	std::atomic<uint64_t> presented_frames {0};
 
 	[[nodiscard]] bool IsPaused() const noexcept {
-		return paused.load(std::memory_order_acquire) ||
-		       launcher_paused.load(std::memory_order_acquire);
+		return paused.load(std::memory_order_acquire) || LauncherPaused();
 	}
 };
 

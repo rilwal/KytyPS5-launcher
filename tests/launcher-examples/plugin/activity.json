@@ -1,0 +1,6 @@
+{
+  "type": "activity",
+  "id": "shaders",
+  "label": "Compiling shaders",
+  "progress": 0.5
+}

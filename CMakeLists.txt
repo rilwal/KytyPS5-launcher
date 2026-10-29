@@ -670,7 +670,12 @@ if(BUILD_TESTING)
 	add_test(NAME build_flags COMMAND $<TARGET_FILE:build_flags_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
-	add_test(NAME launcher_session COMMAND $<TARGET_FILE:launcher_session_tests>)
+	# Also checks the messages against a snapshot of game-launcher's docs/plugin-api/examples;
+	# point KYTY_LAUNCHER_EXAMPLES_DIR at a game-launcher checkout's to check against the latest.
+	set(KYTY_LAUNCHER_EXAMPLES_DIR "${KYTY_TESTS_DIR}/launcher-examples" CACHE PATH
+	    "game-launcher's docs/plugin-api/examples, for launcher_session_tests")
+	add_test(NAME launcher_session
+	         COMMAND $<TARGET_FILE:launcher_session_tests> "${KYTY_LAUNCHER_EXAMPLES_DIR}")
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)

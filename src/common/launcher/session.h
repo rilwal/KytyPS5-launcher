@@ -116,6 +116,7 @@ private:
 	std::condition_variable               m_configure_cv;
 	std::optional<ConfigureValues>        m_configure;
 	bool                                  m_configure_taken = false;
+	bool                                  m_reader_done     = false; // The connection closed
 
 	struct ActivityState {
 		std::string                           label;

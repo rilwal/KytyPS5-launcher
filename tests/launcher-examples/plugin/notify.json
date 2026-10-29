@@ -1,0 +1,6 @@
+{
+  "type": "notify",
+  "title": "State saved",
+  "body": "Slot 1",
+  "level": "info"
+}
