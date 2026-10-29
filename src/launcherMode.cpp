@@ -9,7 +9,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <string>
-#include <vector>
 
 namespace Emulator::LauncherMode {
 
@@ -24,19 +23,6 @@ static void SetPerformanceOverlay(bool enabled) {
 	if (Libs::Graphics::PerformanceOverlayEnabled() != enabled) {
 		Libs::Graphics::TogglePerformanceOverlay();
 	}
-}
-
-// The quick menu's items. Values are read when the menu opens, since F2 also toggles the panel.
-static void SendOverlayItems(Launcher::Session& session, bool perf_overlay) {
-	Launcher::Setting perf;
-	perf.key           = PERF_OVERLAY;
-	perf.section       = "Kyty";
-	perf.label         = "Performance overlay";
-	perf.help          = "Frame times and emulator counters in the corner of the game.";
-	perf.kind          = Launcher::Setting::Kind::Toggle;
-	perf.value         = perf_overlay ? "true" : "false";
-	perf.default_value = "false";
-	session.OverlayItems({perf});
 }
 
 static void ApplyLive(const std::string& key, const std::optional<std::string>& value) {
@@ -58,24 +44,16 @@ static Launcher::Handlers MakeHandlers() {
 	};
 
 	handlers.overlay = [](bool open) {
-		auto* session = Launcher::Session::Get();
-		if (open && session != nullptr) {
-			SendOverlayItems(*session, Libs::Graphics::PerformanceOverlayEnabled());
-		}
 		// The present thread keeps showing the last frame while the guest's vblanks stop.
 		Libs::Graphics::WindowSetLauncherPaused(open);
-		if (session != nullptr) {
+		if (auto* session = Launcher::Session::Get(); session != nullptr) {
 			session->Paused(open);
 		}
 	};
 
-	handlers.invoke = [](const std::string& key, const std::optional<std::string>& value) {
-		ApplyLive(key, value);
-		if (auto* session = Launcher::Session::Get(); session != nullptr) {
-			SendOverlayItems(*session, Libs::Graphics::PerformanceOverlayEnabled());
-		}
-	};
-
+	// Live settings come from the launcher's settings page, which keeps their value. Kyty puts no
+	// rows of its own in the quick menu: a toggle there would change the overlay behind the stored
+	// setting's back, and the next boot's configure would undo it.
 	handlers.setting = [](const std::string& key, const std::optional<std::string>& value) {
 		if (Launcher::Settings::IsLive(key)) {
 			ApplyLive(key, value);
@@ -114,8 +92,6 @@ bool Start(Config::ConfigOptions& config) {
 
 	// The launcher shows trophy unlocks itself (libTrophy.cpp reports them).
 	config.trophy_enabled = false;
-
-	SendOverlayItems(*session, config.perf_overlay_enabled);
 	return true;
 }
 

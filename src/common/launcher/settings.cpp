@@ -32,9 +32,10 @@ struct Text {
 
 struct PresentModeChoice {};
 struct Resolution {};
+struct LanguageChoice {};
 
 using Kind = std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, PresentModeChoice,
-                          Resolution>;
+                          Resolution, LanguageChoice>;
 
 struct Entry {
 	std::string_view key;
@@ -48,6 +49,14 @@ constexpr std::array<std::string_view, 3> PRESENT_MODES = {"Fifo", "Mailbox", "I
 
 constexpr std::array<std::string_view, 6> RESOLUTIONS = {"1280x720",  "1600x900",  "1920x1080",
                                                          "2560x1440", "3200x1800", "3840x2160"};
+
+// By the console's language number (SceSystemParamLang)
+constexpr std::array<std::string_view, Config::MAX_CONSOLE_LANGUAGE + 1> LANGUAGES = {
+    "Japanese", "English (US)", "French", "Spanish", "German", "Italian", "Dutch",
+    "Portuguese (Portugal)", "Russian", "Korean", "Chinese (Traditional)", "Chinese (Simplified)",
+    "Finnish", "Swedish", "Danish", "Norwegian", "Polish", "Portuguese (Brazil)", "English (UK)",
+    "Turkish", "Spanish (Latin America)", "Arabic", "French (Canada)", "Czech", "Hungarian",
+    "Greek", "Romanian", "Thai", "Vietnamese", "Indonesian"};
 
 // The options worth a row in the launcher; debugging aids (dumps, validation, logs) are left out.
 const std::array ENTRIES = {
@@ -81,8 +90,7 @@ const std::array ENTRIES = {
     Entry {"sync-raw-image-buffers", "Synchronize raw image reads", "Graphics",
            Toggle {&ConfigOptions::sync_raw_image_buffers}},
     // System
-    Entry {"console-language", "Console language", "System",
-           Number<uint32_t> {&ConfigOptions::console_language, 0, Config::MAX_CONSOLE_LANGUAGE}},
+    Entry {"console-language", "Console language", "System", LanguageChoice {}},
     Entry {"user-name", "User name", "System", Text {&ConfigOptions::user_name}},
     Entry {"network-connected", "Network", "System", Toggle {&ConfigOptions::network_connected}},
     Entry {"skip-notice-screen", "Skip notice screens", "System",
@@ -128,6 +136,8 @@ std::string ValueOf(const Entry& e, const ConfigOptions& cfg) {
 			    return std::string(PresentModeName(cfg.present_mode));
 		    } else if constexpr (std::is_same_v<K, Resolution>) {
 			    return fmt::format("{}x{}", cfg.screen_width, cfg.screen_height);
+		    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
+			    return std::string(LANGUAGES.at(cfg.console_language));
 		    } else {
 			    return std::to_string(cfg.*kind.field);
 		    }
@@ -147,6 +157,8 @@ Json KindJson(const Entry& e) {
 			    return {{"choice", PRESENT_MODES}};
 		    } else if constexpr (std::is_same_v<K, Resolution>) {
 			    return {{"choice", RESOLUTIONS}};
+		    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
+			    return {{"choice", LANGUAGES}};
 		    } else {
 			    return {{"number", {{"min", kind.min}, {"max", kind.max}}}};
 		    }
@@ -216,6 +228,16 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 			    }
 			    cfg.screen_width  = width;
 			    cfg.screen_height = height;
+		    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
+			    // The name, or the number as on the command line
+			    uint32_t   number = 0;
+			    const auto it     = std::ranges::find(LANGUAGES, value);
+			    if (it != LANGUAGES.end()) {
+				    number = static_cast<uint32_t>(std::distance(LANGUAGES.begin(), it));
+			    } else if (!ParseNumber(value, number) || number > Config::MAX_CONSOLE_LANGUAGE) {
+				    return invalid();
+			    }
+			    cfg.console_language = number;
 		    } else {
 			    std::remove_cvref_t<decltype(cfg.*kind.field)> number {};
 			    if (!ParseNumber(value, number) || number < kind.min || number > kind.max) {

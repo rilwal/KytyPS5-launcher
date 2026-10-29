@@ -82,6 +82,13 @@ void TestSettings() {
 	      "no value is the default");
 	Check(Launcher::Settings::Apply(cfg, "vblank-frequency", "500") != "",
 	      "a number out of range is refused");
+	Check(Launcher::Settings::Apply(cfg, "console-language", "English (UK)").empty() &&
+		          cfg.console_language == 18,
+	      "a console language applies by name");
+	Check(Launcher::Settings::Apply(cfg, "console-language", "0").empty() && cfg.console_language == 0,
+	      "a console language applies by number");
+	Check(Launcher::Settings::Apply(cfg, "console-language", "30") != "",
+	      "an unknown console language is refused");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
 	Check(Launcher::Settings::IsLive("perf-overlay") && !Launcher::Settings::IsLive("hdr"),
 	      "only the performance overlay changes in game");

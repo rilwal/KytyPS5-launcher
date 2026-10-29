@@ -19,7 +19,7 @@ changes and Kyty runs as before.
 
 | When | Message |
 | --- | --- |
-| Connected | `booting`, then the quick menu's items (`overlay_items`) |
+| Connected | `booting` |
 | First frame on screen | `ready {pid, window}`: the HWND, X11 window id or NSWindow number |
 | Settings the launcher sent can't be applied | `notify` (error) |
 | The game opens its trophy set | `achievements`: every trophy with the stored unlocks |
@@ -44,6 +44,10 @@ showing the last frame and the guest's vblanks stop.
 (`present-mode`), plus `resolution` for the window size. The launcher stores the player's values,
 globally and per game, and sends them with `configure` before boot; Kyty applies them in memory
 over its command line. `perf-overlay` is live: it can change from the launcher while a game runs.
+`console-language` is a choice of language names; Kyty also takes the number, as on its command line.
+
+Kyty adds no rows of its own to the quick menu, so the launcher's stored value stays the one that
+counts. F2 still shows or hides the performance overlay, for that session only.
 
 ## Trophies without playing
 
