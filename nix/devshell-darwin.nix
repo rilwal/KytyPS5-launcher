@@ -8,6 +8,7 @@ pkgs.mkShellNoCC {
   name = "kytyps5";
 
   nativeBuildInputs = with pkgs; [
+    ccache # CMake picks up any ccache on PATH; this keeps it from coming from Homebrew
     cmake
     ninja
     git
