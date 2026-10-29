@@ -5,7 +5,7 @@
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" ];
+      systems = [ "x86_64-linux" "aarch64-darwin" "x86_64-darwin" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
@@ -14,7 +14,10 @@
           pkgs = import nixpkgs { inherit system; };
         in
         {
-          default = import ./nix/devshell.nix { inherit pkgs; };
+          default =
+            if pkgs.stdenv.hostPlatform.isDarwin
+            then import ./nix/devshell-darwin.nix { inherit pkgs; }
+            else import ./nix/devshell.nix { inherit pkgs; };
         });
     };
 }
