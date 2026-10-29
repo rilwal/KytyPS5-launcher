@@ -12,6 +12,10 @@ class Presenter;
 void                     WindowRun();
 void                     WindowShutdown();
 
+// Launcher mode (common/launcher/session.h). Safe to call from any thread.
+void WindowRequestQuit();
+void WindowSetLauncherPaused(bool paused);
+
 } // namespace Libs::Graphics
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_WINDOW_H_ */

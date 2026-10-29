@@ -3,16 +3,21 @@
 #include "common/dateTime.h"
 #include "common/debug.h"
 #include "common/file.h"
+#include "common/launcher/protocol.h"
+#include "common/launcher/settings.h"
+#include "common/launcher/trophyList.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "emulator.h"
+#include "launcherMode.h"
 #include "kytyGitVersion.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <filesystem>
+#include <optional>
 #include <string_view>
 #include <vector>
 #include <fmt/format.h>
@@ -109,6 +114,10 @@ static void PrintUsage() {
 #endif
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
+	::printf("\nFor the game launcher (each on its own, as the first option):\n");
+	::printf("  --launcher-describe-settings         Print the settings it can show, as JSON.\n");
+	::printf("  --launcher-list-trophies <dir>       Print a game's trophies and unlocks, as JSON.\n");
+	::printf("  --launcher-self-test <dir>           Check the messages against its examples.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -436,6 +445,57 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 	return show_help || (!options.app0_dir.empty() && !options.elf.empty());
 }
 
+// The game launcher's queries (common/launcher), answered on stdout without booting anything.
+// Returns the exit code, or nothing if argv isn't one.
+static std::optional<int> LauncherQuery(int argc, char* argv[]) {
+	const std::string_view first = argv[1];
+
+	if (first == Common::Launcher::Settings::DescribeFlag) {
+		::printf("%s\n", Common::Launcher::Settings::Describe().c_str());
+		return 0;
+	}
+
+	// --launcher-list-trophies <game dir> [--user-id <num>] [--console-language <0-29>]
+	// Unlocks are read from the folder Kyty runs in, as when it plays.
+	if (first == Common::Launcher::ListTrophiesFlag) {
+		if (argc < 3) {
+			::printf("%s needs a game folder\n", Common::Launcher::ListTrophiesFlag);
+			return 1;
+		}
+		int32_t  user_id  = Config::DEFAULT_USER_ID;
+		uint32_t language = Config::DEFAULT_CONSOLE_LANGUAGE;
+		for (int i = 3; i + 1 < argc; i += 2) {
+			const std::string_view arg = argv[i];
+			if ((arg == "--user-id" && !ParseUserId(argv[i + 1], user_id)) ||
+			    (arg == "--console-language" && !ParseConsoleLanguage(argv[i + 1], language))) {
+				::printf("invalid %s: %s\n", argv[i], argv[i + 1]);
+				return 1;
+			}
+		}
+		const auto dir = Common::PathFromUtf8(Common::FixFilenameSlash(argv[2]));
+		::printf("%s\n", Common::Launcher::ListGameTrophies(dir, {}, user_id,
+		                                                    static_cast<int>(language))
+		                      .c_str());
+		return 0;
+	}
+
+	// --launcher-self-test <the launcher's docs/plugin-api/examples>
+	if (first == "--launcher-self-test") {
+		if (argc < 3) {
+			::printf("--launcher-self-test needs the examples folder\n");
+			return 1;
+		}
+		const auto errors = Common::Launcher::SelfTest(argv[2]);
+		for (const auto& error: errors) {
+			::printf("%s\n", error.c_str());
+		}
+		::printf("%zu problem(s)\n", errors.size());
+		return errors.empty() ? 0 : 1;
+	}
+
+	return std::nullopt;
+}
+
 static int Main(int argc, char* argv[]) {
 	VirtualMemory::Init();
 	InitializeThreads();
@@ -448,8 +508,15 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
+	if (const auto code = LauncherQuery(argc, argv)) {
+		return *code;
+	}
+
 	if (!ParseArgs(argc, argv, options, show_help)) {
 		PrintUsage();
+		LauncherMode::Fail("Kyty couldn't start the game: its folder or the launch options are "
+		                   "invalid. The game's log has the details.",
+		                   "invalid_file_or_folder");
 		return 1;
 	}
 
@@ -457,6 +524,8 @@ static int Main(int argc, char* argv[]) {
 		PrintUsage();
 		return 0;
 	}
+
+	LauncherMode::Start(options.config);
 
 	Run(options);
 

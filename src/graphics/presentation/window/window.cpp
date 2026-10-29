@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/launcher/session.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -28,9 +29,15 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <vulkan/vk_platform.h>
+
+#if defined(__APPLE__)
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
 
 #include "stb_image.h"
 
@@ -747,7 +754,7 @@ void WindowContext::Run() {
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
 
 	while (!loop.need_exit) {
-		if (loop.paused.load(std::memory_order_acquire)) {
+		if (loop.IsPaused()) {
 			if (!timer.IsPaused()) {
 				timer.Pause();
 			}
@@ -767,12 +774,75 @@ void WindowContext::Run() {
 			title_time   = now;
 			title_frames = frames;
 		}
+		if (!loop.launcher_ready_sent && loop.presented_frames.load(std::memory_order_relaxed) != 0) {
+			loop.launcher_ready_sent = true;
+			SendLauncherReady();
+		}
 		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
 		}
 		ProcessEvent(timer.GetTimeS());
 	}
+}
+
+// A native handle for the launcher's focus handoff: the HWND, the X11 window id, or the
+// NSWindow's number. Wayland has none to give.
+static std::optional<uint64_t> NativeWindowId(SDL_Window* window) {
+	const SDL_PropertiesID props = SDL_GetWindowProperties(window);
+	if (props == 0) {
+		return std::nullopt;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (void* hwnd = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+	    hwnd != nullptr) {
+		return reinterpret_cast<uintptr_t>(hwnd);
+	}
+#elif defined(__APPLE__)
+	if (void* ns_window =
+	        SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
+	    ns_window != nullptr) {
+		using WindowNumber = long (*)(id, SEL);
+		const long number  = reinterpret_cast<WindowNumber>(objc_msgSend)(
+		    static_cast<id>(ns_window), sel_registerName("windowNumber"));
+		return static_cast<uint64_t>(number);
+	}
+#else
+	if (const Sint64 x11 = SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+	    x11 != 0) {
+		return static_cast<uint64_t>(x11);
+	}
+#endif
+	return std::nullopt;
+}
+
+// The game's first frame is on screen: the launcher can hand it the focus.
+void WindowContext::SendLauncherReady() {
+	auto* session = Common::Launcher::Session::Get();
+	if (session == nullptr) {
+		return;
+	}
+	session->Ready(Common::Launcher::ProcessId(), NativeWindowId(window));
+}
+
+void WindowRequestQuit() {
+	SDL_Event event {};
+	event.type = SDL_EVENT_QUIT;
+	if (!SDL_PushEvent(&event)) {
+		LOGF("Could not request quit: %s\n", SDL_GetError());
+	}
+}
+
+void WindowSetLauncherPaused(bool paused) {
+	if (g_window == nullptr) {
+		return;
+	}
+	LOGF("Launcher pause: %s\n", paused ? "true" : "false");
+	g_window->loop.launcher_paused.store(paused, std::memory_order_release);
+	// Wake the window loop so its timer follows at once.
+	SDL_Event event {};
+	event.type = SDL_EVENT_USER;
+	SDL_PushEvent(&event);
 }
 
 static void WindowCreate(WindowContext& context) {

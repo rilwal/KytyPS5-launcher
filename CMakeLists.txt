@@ -330,6 +330,8 @@ list(APPEND kyty_emulator_src ${gpu_blit_shader_headers})
 list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/emulator.h"
 	"${KYTY_SOURCE_DIR}/emulator.cpp"
+	"${KYTY_SOURCE_DIR}/launcherMode.h"
+	"${KYTY_SOURCE_DIR}/launcherMode.cpp"
 )
 list(REMOVE_DUPLICATES kyty_emulator_src)
 
@@ -421,6 +423,12 @@ add_executable(archive_file_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(archive_file_tests common ZArchive::zarchive)
 target_include_directories(archive_file_tests PRIVATE ${inc_headers})
+
+add_executable(launcher_session_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LauncherSessionTests.cpp"
+)
+target_link_libraries(launcher_session_tests common nlohmann_json::nlohmann_json)
+target_include_directories(launcher_session_tests PRIVATE ${inc_headers})
 
 add_executable(trophy_system_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/TrophySystemTests.cpp"
@@ -662,6 +670,7 @@ if(BUILD_TESTING)
 	add_test(NAME build_flags COMMAND $<TARGET_FILE:build_flags_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
+	add_test(NAME launcher_session COMMAND $<TARGET_FILE:launcher_session_tests>)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
@@ -755,6 +764,7 @@ if(BUILD_TESTING)
 		build_flags_tests
 		archive_file_tests
 		trophy_system_tests
+		launcher_session_tests
 		avplayer_file_tests
 		vdecsw_tests
 		bit_array_tests
