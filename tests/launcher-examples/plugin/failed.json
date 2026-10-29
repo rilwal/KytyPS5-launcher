@@ -1,0 +1,5 @@
+{
+  "type": "failed",
+  "reason": "The PS3 firmware isn't installed.",
+  "code": "firmware_missing"
+}

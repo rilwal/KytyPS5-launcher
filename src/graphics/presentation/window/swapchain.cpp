@@ -1016,7 +1016,7 @@ bool Presenter::PresentLastFrame() {
 }
 
 bool Presenter::IsGuestPaused() const noexcept {
-	return m_impl->window.loop.paused.load(std::memory_order_acquire);
+	return m_impl->window.loop.IsPaused();
 }
 
 bool Presenter::IsHdrSupported() const noexcept {

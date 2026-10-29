@@ -1,0 +1,19 @@
+{
+  "type": "achievements",
+  "list": [
+    {
+      "id": "first-steps",
+      "name": "First Steps",
+      "description": "Leave the starting village.",
+      "hidden": false,
+      "grade": "bronze",
+      "points": 10,
+      "rarity": {
+        "permille": 782,
+        "of": "players"
+      },
+      "dlc": false,
+      "unlocked_at": 1700000000
+    }
+  ]
+}

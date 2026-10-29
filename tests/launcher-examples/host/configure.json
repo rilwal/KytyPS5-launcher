@@ -1,0 +1,7 @@
+{
+  "type": "configure",
+  "values": {
+    "Video.Renderer": "Vulkan",
+    "Video.Resolution Scale": "150"
+  }
+}

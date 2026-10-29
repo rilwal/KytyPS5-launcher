@@ -1,4 +1,6 @@
 #include "common/emulatorConfig.h"
+#include "common/launcher/session.h"
+#include "common/launcher/trophyList.h"
 #include "common/trophies.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "kernel/fileSystem.h"
@@ -107,6 +109,9 @@ struct TrophyState {
 	std::filesystem::path    path;
 	// Guests (players 2+) have no profile: nothing is loaded, saved or announced.
 	bool guest = false;
+	// The launcher's player: unlocks go to the launcher (common/launcher/session.h).
+	bool     launcher_user = false;
+	uint32_t service_label = 0;
 };
 
 struct TrophyContext {
@@ -125,6 +130,25 @@ constexpr int NP_TROPHY2_ERROR_INVALID_CONTEXT   = static_cast<int>(0x80553909);
 constexpr int NP_TROPHY2_ERROR_INVALID_TROPHY_ID = static_cast<int>(0x8055390a);
 constexpr int NP_TROPHY2_ERROR_INVALID_GROUP_ID  = static_cast<int>(0x8055390b);
 constexpr int NP_TROPHY2_ERROR_NOT_REGISTERED    = static_cast<int>(0x80553920);
+
+// Every trophy set loaded so far, by service label, as the launcher's list. Caller holds
+// g_trophy_mutex.
+static std::map<uint32_t, std::vector<Common::Launcher::Achievement>> g_launcher_lists;
+
+// The launcher keeps one list per game, so a new set is sent with the ones before it.
+static void SendTrophyList(const TrophyState& state) {
+	auto* session = Common::Launcher::Session::Get();
+	if (session == nullptr || !state.launcher_user) {
+		return;
+	}
+	g_launcher_lists[state.service_label] =
+	    Common::Launcher::TrophyList(*state.package, state.unlocks, state.service_label);
+	std::vector<Common::Launcher::Achievement> all;
+	for (const auto& [label, list]: g_launcher_lists) {
+		all.insert(all.end(), list.begin(), list.end());
+	}
+	session->Achievements(all);
+}
 
 // Caller holds g_trophy_mutex. Both NpTrophy2 and UDS use the same user/service record.
 static TrophyState* LoadTrophyState(TrophyKey key) {
@@ -159,9 +183,13 @@ static TrophyState* LoadTrophyState(TrophyKey key) {
 	auto       path  = guest ? std::filesystem::path {}
 	                         : Trophies::UnlocksPath({}, title_id, key.first, key.second);
 	auto unlocks = guest ? Trophies::UnlockData {} : Trophies::LoadUnlockData(path);
-	return &g_states
-	            .emplace(key, TrophyState {&package, std::move(unlocks), std::move(path), guest})
-	            .first->second;
+	auto& state  = g_states
+	                  .emplace(key, TrophyState {&package, std::move(unlocks), std::move(path), guest,
+	                                             !guest && key.first == Config::GetUserId(),
+	                                             key.second})
+	                  .first->second;
+	SendTrophyList(state);
+	return &state;
 }
 
 static int GetTrophyState(int context, TrophyState** state) {
@@ -279,6 +307,12 @@ static void RecordTrophyUnlock(TrophyState& state, int trophy_id, bool from_stat
 		LOGF("[Trophy] could not save unlocks to %s\n", state.path.string().c_str());
 	} else {
 		LOGF("[Trophy] recorded unlock %d: %s\n", trophy_id, found->second.name.c_str());
+	}
+	if (auto* session = Common::Launcher::Session::Get(); session != nullptr && state.launcher_user) {
+		for (const auto id: earned) {
+			session->Unlocked(Common::Launcher::TrophyId(state.service_label, id),
+			                  Common::Launcher::TickToUnix(timestamp));
+		}
 	}
 	if (Config::TrophyEnabled()) {
 		for (const auto id: earned) {
