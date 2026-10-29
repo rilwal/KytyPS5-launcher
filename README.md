@@ -305,7 +305,8 @@ Requirements:
 
 - An Apple Silicon Mac with Rosetta 2 installed (`softwareupdate --install-rosetta`)
 - Xcode (or the Command Line Tools)
-- Homebrew packages: `brew install cmake ninja glslang python`
+- cmake, ninja, glslang and python: `nix develop` gives a shell with them (and prints the build
+  commands), or `brew install cmake ninja glslang python`
 - Qt 6 (Concurrent, Network, and Widgets) with x86-64 support. The official Qt installation is
   universal and works; Homebrew's Qt is arm64-only and will not link
 
