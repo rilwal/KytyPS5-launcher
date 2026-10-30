@@ -36,7 +36,7 @@ namespace {
 constexpr std::string_view PLUGIN_FLAG = "--launcher-plugin";
 constexpr std::string_view GAME_DIR    = "--game-dir";
 
-// The setting holding the game folders, as a list (one per line) or a path list (':' or ';')
+// The setting holding the game folders: a path list (':' or ';' on Windows)
 constexpr char GAME_DIRS_KEY[] = "game_dirs";
 constexpr char PAGE[]          = "Kyty";
 
