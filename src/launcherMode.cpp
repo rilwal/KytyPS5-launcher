@@ -9,11 +9,13 @@
 #include "graphics/presentation/window.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace Emulator::LauncherMode {
@@ -43,16 +45,38 @@ namespace Overlay {
 
 namespace Ports = Launcher::OverlayPorts;
 
-// The capture waits here until the shell's service is known (overlay_surface), so it can go
-// there before capture_surface names it.
+// The capture waits here until the shell's surfaces are imported, so it goes to the shell only
+// when Kyty can draw the menu: the shell shows the menu once it has the capture. A thread of its
+// own sends it, keeping socket I/O off the present thread.
 static std::mutex                     g_mutex;
+static std::condition_variable        g_cv;
+static bool                           g_wake = false;
 static std::unique_ptr<Ports::DmaBuf> g_capture;
 
+// Held while the service or the surfaces change (overlay_surface) and while sending, so the
+// capture never goes to a service whose surfaces aren't Kyty's yet
+static std::mutex g_io_mutex;
+
+static void Wake() {
+	{
+		std::lock_guard lock(g_mutex);
+		g_wake = true;
+	}
+	g_cv.notify_one();
+}
+
+static void DropCapture() {
+	std::lock_guard lock(g_mutex);
+	g_capture.reset();
+}
+
 static void SendCapture() {
+	std::lock_guard                io(g_io_mutex);
 	std::unique_ptr<Ports::DmaBuf> capture;
 	{
 		std::lock_guard lock(g_mutex);
-		if (g_capture == nullptr || !Ports::HasService()) {
+		if (g_capture == nullptr || !Ports::HasService() ||
+		    !Libs::Graphics::LauncherOverlay::SurfacesReady()) {
 			return;
 		}
 		capture = std::move(g_capture);
@@ -65,27 +89,38 @@ static void SendCapture() {
 	}
 }
 
-static void DropCapture() {
-	std::lock_guard lock(g_mutex);
-	g_capture.reset();
+[[noreturn]] static void Sender() {
+	for (;;) {
+		{
+			std::unique_lock lock(g_mutex);
+			g_cv.wait(lock, []() { return g_wake; });
+			g_wake = false;
+		}
+		SendCapture();
+	}
 }
 
 static void OnSurfaces(const Launcher::HostMessage& msg) {
+	std::lock_guard io(g_io_mutex);
+
 	// No buffers takes the overlay away. The surfaces come from the shell's service; the ids
 	// say which they should be.
 	std::optional<Ports::Surfaces> surfaces;
 	std::string                    error;
 	if (msg.buffers.empty()) {
 		Ports::SetService({}, error);
-		// The menu is closed: a capture still waiting for a service isn't wanted
+		// The menu is closed: a capture still waiting isn't wanted
 		DropCapture();
 	} else if (msg.service.empty()) {
 		LOGF("[Launcher] overlay_surface: no service to get the surfaces from\n");
 	} else if (!Ports::SetService(msg.service, error) ||
 	           !(surfaces = Ports::Fetch(msg.buffers, msg.header, error))) {
 		LOGF("[Launcher] overlay_surface: %s\n", error.c_str());
+		// No capture goes out without the surfaces, so the shell comes to the front instead
+		Ports::SetService({}, error);
 	}
 
+	// The present thread imports them, then says so (SetReadyCallback)
 	if (surfaces) {
 		Libs::Graphics::LauncherOverlay::SetSurfaces(std::move(surfaces->buffers),
 		                                             std::move(surfaces->header), msg.width,
@@ -93,18 +128,19 @@ static void OnSurfaces(const Launcher::HostMessage& msg) {
 	} else {
 		Libs::Graphics::LauncherOverlay::SetSurfaces({}, nullptr, 0, 0);
 	}
-	SendCapture();
 }
 
 static void Start() {
+	std::thread(Sender).detach();
 	Libs::Graphics::LauncherOverlay::SetCaptureCallback(
 	    [](std::unique_ptr<Ports::DmaBuf> capture) {
 		    {
 			    std::lock_guard lock(g_mutex);
 			    g_capture = std::move(capture);
 		    }
-		    SendCapture();
+		    Wake();
 	    });
+	Libs::Graphics::LauncherOverlay::SetReadyCallback(Wake);
 	// The window's size, which the shell lays the menu out for. Only a renderer that can draw
 	// the overlay reports it, and the first one is what makes the launcher count on it.
 	Libs::Graphics::LauncherOverlay::SetViewCallback([](uint32_t width, uint32_t height) {

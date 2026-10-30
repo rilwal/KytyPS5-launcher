@@ -37,6 +37,8 @@ std::mutex                                   g_mutex;
 std::optional<Config>                        g_pending;
 std::function<void(std::unique_ptr<DmaBuf>)> g_capture_callback;
 std::function<void(uint32_t, uint32_t)>      g_view_callback;
+std::function<void()>                        g_ready_callback;
+std::atomic<bool>                            g_ready {false};
 std::atomic<bool>                            g_visible {false};
 std::atomic<bool>                            g_capture_requested {false};
 std::atomic<bool>                            g_capture_reporting {false};
@@ -45,16 +47,19 @@ std::atomic<uint32_t>                        g_presents_owed {0};
 constexpr uint64_t DRM_FORMAT_MOD_LINEAR = 0;
 constexpr auto     FORMAT                = vk::Format::eB8G8R8A8Unorm;
 
+// With queue families, an ownership transfer from or to the shell's process
 void Barrier(vk::CommandBuffer command, vk::Image image, vk::ImageLayout from, vk::ImageLayout to,
              vk::AccessFlags src_access, vk::AccessFlags dst_access,
-             vk::PipelineStageFlags src_stage, vk::PipelineStageFlags dst_stage) {
+             vk::PipelineStageFlags src_stage, vk::PipelineStageFlags dst_stage,
+             uint32_t src_queue = VK_QUEUE_FAMILY_IGNORED,
+             uint32_t dst_queue = VK_QUEUE_FAMILY_IGNORED) {
 	vk::ImageMemoryBarrier barrier {};
 	barrier.srcAccessMask       = src_access;
 	barrier.dstAccessMask       = dst_access;
 	barrier.oldLayout           = from;
 	barrier.newLayout           = to;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.srcQueueFamilyIndex = src_queue;
+	barrier.dstQueueFamilyIndex = dst_queue;
 	barrier.image               = image;
 	barrier.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 	command.pipelineBarrier(src_stage, dst_stage, {}, 0, nullptr, 0, nullptr, 1, &barrier);
@@ -73,6 +78,7 @@ void SetSurfaces(std::vector<std::unique_ptr<DmaBuf>> buffers, std::unique_ptr<D
 	// Replacing a config the present thread hasn't taken yet closes its surfaces
 	std::lock_guard lock(g_mutex);
 	g_pending       = std::move(config);
+	g_ready         = false;
 	g_presents_owed = PRESENTS_AFTER_CHANGE;
 }
 
@@ -88,6 +94,8 @@ void RequestCapture() {
 
 void CancelCapture() {
 	g_capture_requested = false;
+	// A copy still in flight isn't reported either
+	g_capture_reporting = false;
 }
 
 void SetCaptureCallback(std::function<void(std::unique_ptr<DmaBuf>)> callback) {
@@ -98,6 +106,15 @@ void SetCaptureCallback(std::function<void(std::unique_ptr<DmaBuf>)> callback) {
 void SetViewCallback(std::function<void(uint32_t, uint32_t)> callback) {
 	std::lock_guard lock(g_mutex);
 	g_view_callback = std::move(callback);
+}
+
+void SetReadyCallback(std::function<void()> callback) {
+	std::lock_guard lock(g_mutex);
+	g_ready_callback = std::move(callback);
+}
+
+bool SurfacesReady() {
+	return g_ready;
 }
 
 bool WantsPresents() {
@@ -366,8 +383,11 @@ struct Header {
 	}
 
 	// The buffer to draw this present, taking a newer one if the shell published one and the GPU
-	// is done with Kyty's. None until the shell has published anything.
-	std::optional<uint32_t> Take(CommandScheduler& scheduler, uint32_t buffer_count) {
+	// is done with Kyty's (`fresh` says so). None until the shell has published anything; false
+	// if the shell broke the exchange.
+	bool Take(CommandScheduler& scheduler, uint32_t buffer_count, std::optional<uint32_t>& out,
+	          bool& fresh) {
+		fresh = false;
 		if (map != nullptr) {
 			auto* words = static_cast<std::atomic<uint32_t>*>(map);
 			if (words[0].load(std::memory_order_acquire) == MAGIC &&
@@ -375,14 +395,20 @@ struct Header {
 			    (sampled_tick == 0 || scheduler.IsFree(sampled_tick))) {
 				// Give Kyty's back (bit clear) and take the newer one
 				const uint32_t got = words[1].exchange(mine, std::memory_order_acq_rel) & ~NEWER;
-				if (got < buffer_count) {
-					mine         = got;
-					has_content  = true;
-					sampled_tick = 0;
+				if (got >= buffer_count) {
+					// Kyty's buffer is back in the word, so it's no longer Kyty's to draw
+					LOGF("[Launcher] overlay: the launcher published buffer %u of %u\n", got,
+					     buffer_count);
+					return false;
 				}
+				mine         = got;
+				has_content  = true;
+				sampled_tick = 0;
+				fresh        = true;
 			}
 		}
-		return has_content ? std::optional(mine) : std::nullopt;
+		out = has_content ? std::optional(mine) : std::nullopt;
+		return true;
 	}
 
 	void Destroy() {
@@ -395,8 +421,42 @@ struct Header {
 
 static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t));
 
+// Whether linear BGRA8 dma-bufs can be imported for sampling and exported as copy targets
+static bool ProbeSharing(const GraphicContext& graphics) {
+	if (!graphics.dma_buf_sharing_enabled) {
+		return false;
+	}
+	const auto can = [&](vk::ImageUsageFlags usage, vk::ExternalMemoryFeatureFlagBits feature) {
+		vk::PhysicalDeviceImageDrmFormatModifierInfoEXT modifier {};
+		modifier.drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
+		modifier.sharingMode       = vk::SharingMode::eExclusive;
+		vk::PhysicalDeviceExternalImageFormatInfo external {};
+		external.pNext      = &modifier;
+		external.handleType = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+		vk::PhysicalDeviceImageFormatInfo2 info {};
+		info.pNext  = &external;
+		info.format = FORMAT;
+		info.type   = vk::ImageType::e2D;
+		info.tiling = vk::ImageTiling::eDrmFormatModifierEXT;
+		info.usage  = usage;
+		vk::ExternalImageFormatProperties external_props {};
+		vk::ImageFormatProperties2        props {};
+		props.pNext = &external_props;
+		return graphics.physical_device.getImageFormatProperties2(&info, &props) ==
+		           vk::Result::eSuccess &&
+		       (external_props.externalMemoryProperties.externalMemoryFeatures & feature);
+	};
+	const bool import =
+	    can(vk::ImageUsageFlagBits::eSampled, vk::ExternalMemoryFeatureFlagBits::eImportable);
+	const bool export_ =
+	    can(vk::ImageUsageFlagBits::eTransferDst, vk::ExternalMemoryFeatureFlagBits::eExportable);
+	LOGF("[Launcher] overlay: linear BGRA8 dma-buf import %s, export %s\n", import ? "yes" : "no",
+	     export_ ? "yes" : "no");
+	return import && export_;
+}
+
 struct Renderer::Impl {
-	explicit Impl(GraphicContext& g): graphics(g) {}
+	explicit Impl(GraphicContext& g): graphics(g), supported(ProbeSharing(g)) {}
 
 	// Surfaces taken away while the GPU may still read them, freed once it's done
 	struct Retired {
@@ -420,9 +480,12 @@ struct Renderer::Impl {
 
 	vk::Extent2D view {};
 
-	[[nodiscard]] bool Supported() const { return graphics.dma_buf_sharing_enabled; }
+	const bool supported; // ProbeSharing
+
+	[[nodiscard]] bool Supported() const { return supported; }
 
 	void ReleaseOverlay() {
+		g_ready = false;
 		if (!buffers.empty() || header.map != nullptr) {
 			retired.push_back({std::move(buffers), std::exchange(header, {}), last_sampled_tick});
 		}
@@ -483,6 +546,21 @@ struct Renderer::Impl {
 
 		LOGF("[Launcher] overlay: %zu buffer(s) of %ux%u, header %u\n", buffers.size(),
 		     config->width, config->height, header.id);
+
+		// Only now may the capture go to the shell: it shows the menu once it has it.
+		std::function<void()> callback;
+		{
+			std::lock_guard lock(g_mutex);
+			// A newer set came meanwhile: that one has to be imported first
+			if (g_pending) {
+				return;
+			}
+			g_ready  = true;
+			callback = g_ready_callback;
+		}
+		if (callback) {
+			callback();
+		}
 	}
 
 	void ReportCapture() {
@@ -637,10 +715,11 @@ void Renderer::Capture(vk::CommandBuffer command, vk::Image source, vk::Extent2D
 	copy.extent         = vk::Extent3D {extent.width, extent.height, 1};
 	command.copyImage(staging, vk::ImageLayout::eTransferSrcOptimal, impl.capture.image,
 	                  vk::ImageLayout::eTransferDstOptimal, 1, &copy);
+	// Released to the shell's process
 	Barrier(command, impl.capture.image, vk::ImageLayout::eTransferDstOptimal,
-	        vk::ImageLayout::eGeneral, vk::AccessFlagBits::eTransferWrite,
-	        vk::AccessFlagBits::eMemoryRead, vk::PipelineStageFlagBits::eTransfer,
-	        vk::PipelineStageFlagBits::eBottomOfPipe);
+	        vk::ImageLayout::eGeneral, vk::AccessFlagBits::eTransferWrite, {},
+	        vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe,
+	        impl.graphics.queue_family, VK_QUEUE_FAMILY_EXTERNAL);
 
 	impl.captured_now = true;
 	LOGF("[Launcher] overlay: capturing the game's frame (%ux%u) into surface %u\n", extent.width,
@@ -654,18 +733,27 @@ vk::ImageView Renderer::Acquire(vk::CommandBuffer command) {
 	}
 	// With a header, the buffer the exchange gave Kyty (nothing until one comes); without, the
 	// only one
-	const auto count = static_cast<uint32_t>(impl.buffers.size());
-	const auto index = impl.header.map != nullptr ? impl.header.Take(*impl.scheduler, count)
-	                                              : std::optional<uint32_t>(0);
+	const auto              count = static_cast<uint32_t>(impl.buffers.size());
+	std::optional<uint32_t> index;
+	// Without a header the shell may redraw the one buffer at any time
+	bool fresh = true;
+	if (impl.header.map == nullptr) {
+		index = 0;
+	} else if (!impl.header.Take(*impl.scheduler, count, index, fresh)) {
+		impl.ReleaseOverlay();
+		return nullptr;
+	}
 	if (!index) {
 		return nullptr;
 	}
 	auto& buffer = impl.buffers[*index];
-	// The shell writes it outside Vulkan; it's linear, so leaving UNDEFINED loses nothing
-	if (buffer.layout != vk::ImageLayout::eShaderReadOnlyOptimal) {
+	// The shell wrote it from its own process: acquire it from there, which makes its writes
+	// visible. It's linear, so leaving UNDEFINED loses nothing.
+	if (fresh || buffer.layout != vk::ImageLayout::eShaderReadOnlyOptimal) {
 		Barrier(command, buffer.image, vk::ImageLayout::eUndefined,
 		        vk::ImageLayout::eShaderReadOnlyOptimal, {}, vk::AccessFlagBits::eShaderRead,
-		        vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eFragmentShader);
+		        vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eFragmentShader,
+		        VK_QUEUE_FAMILY_EXTERNAL, impl.graphics.queue_family);
 		buffer.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
 	}
 	impl.sampled_now = true;

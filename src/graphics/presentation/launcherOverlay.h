@@ -45,6 +45,12 @@ void CancelCapture();
 void SetCaptureCallback(std::function<void(std::unique_ptr<DmaBuf>)> callback);
 void SetViewCallback(std::function<void(uint32_t width, uint32_t height)> callback);
 
+// Whether the present thread has imported the shell's current surfaces, which the capture has to
+// wait for: the shell shows the menu once it has the capture. The callback (present thread) says
+// when this turns true.
+[[nodiscard]] bool SurfacesReady();
+void               SetReadyCallback(std::function<void()> callback);
+
 // Whether presents are needed to show the overlay or finish a capture, though no game frame
 // comes (e.g. while loading). Any thread.
 [[nodiscard]] bool WantsPresents();
