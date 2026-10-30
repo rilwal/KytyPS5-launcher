@@ -122,6 +122,7 @@ static void PrintUsage() {
 	::printf("  --launcher-plugin [--game-dir <dir>] Run as the launcher's plugin for Kyty's games.\n");
 	::printf("\nFor games the plugin starts:\n");
 	::printf("  --launcher-setting <key>=<value>     A launcher setting, by its key. Repeatable.\n");
+	::printf("  --launcher-no-configure              Don't wait for the launcher's settings.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -258,6 +259,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			continue;
 		}
 
+		if (arg == "--launcher-no-configure") {
+			options.skip_configure = true;
+			continue;
+		}
+
 		if (!arg.starts_with("--")) {
 			::printf("game input must be provided with --game\n");
 			return false;
@@ -313,7 +319,6 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("%s\n", error.c_str());
 				return false;
 			}
-			options.launcher_settings = true;
 		} else if (arg == "--guest-exec") {
 			options.elf = Common::PathFromUtf8(Common::FixFilenameSlash(value));
 			options.config.guest_arguments.assign(argv + i + 1, argv + argc);
@@ -546,7 +551,7 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
-	LauncherMode::Start(options.config, !options.launcher_settings);
+	LauncherMode::Start(options.config, !options.skip_configure);
 
 	Run(options);
 

@@ -8,15 +8,21 @@
 #include "common/stringUtils.h"
 #include "launcher_runner.h"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -39,6 +45,13 @@ constexpr std::string_view GAME_DIR    = "--game-dir";
 // The setting holding the game folders: a path list (':' or ';' on Windows)
 constexpr char GAME_DIRS_KEY[] = "game_dirs";
 constexpr char PAGE[]          = "Kyty";
+
+// launcherd sends a setting's stored value right after the settings are described, and nothing
+// for one never set, so the first library waits this long for the game folders.
+constexpr std::chrono::milliseconds GAME_DIRS_WAIT {1000};
+
+// A game this plugin starts: its settings are on the command line, and no configure comes
+constexpr char NO_CONFIGURE_FLAG[] = "--launcher-no-configure";
 
 fs::path SelfPath() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -72,8 +85,15 @@ std::vector<fs::path> SplitFolders(std::string_view text) {
 		if (!part.empty() && part.back() == '\r') {
 			part.pop_back();
 		}
-		if (part.starts_with("~")) {
-			if (const char* home = std::getenv("HOME"); home != nullptr) {
+		// Only "~" and "~/...", as launcher-core expands them
+		if (part == "~" || part.starts_with("~/") || part.starts_with("~\\")) {
+			const char* home = std::getenv("HOME");
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+			if (home == nullptr) {
+				home = std::getenv("USERPROFILE");
+			}
+#endif
+			if (home != nullptr) {
 				part = home + part.substr(1);
 			}
 		}
@@ -85,9 +105,33 @@ std::vector<fs::path> SplitFolders(std::string_view text) {
 	return out;
 }
 
+// The executable as launcherd started it: the configured path when that's absolute, so a wrapper
+// (an AppImage, a Nix wrapper) is spawned again rather than the binary inside it.
+fs::path ExePath(const char* argv0) {
+	const fs::path given = argv0 != nullptr ? Common::PathFromUtf8(argv0) : fs::path {};
+	std::error_code error;
+	if (given.is_absolute() && fs::is_regular_file(given, error)) {
+		return given;
+	}
+	return SelfPath();
+}
+
+// {game_dir}, {boot} and {title_id} in a per-game argument, as launcher-core substitutes them
+std::string Substitute(std::string arg, const std::string& dir, const std::string& title_id) {
+	const std::string boot = Common::PathToString(Common::PathFromUtf8(dir) / "eboot.bin");
+	for (const auto& [from, to]: {std::pair<std::string_view, const std::string&> {"{game_dir}", dir},
+	                              {"{boot}", boot},
+	                              {"{title_id}", title_id}}) {
+		for (size_t at = arg.find(from); at != std::string::npos; at = arg.find(from, at + to.size())) {
+			arg.replace(at, from.size(), to);
+		}
+	}
+	return arg;
+}
+
 class Plugin {
 public:
-	explicit Plugin(std::vector<fs::path> arg_dirs): m_arg_dirs(std::move(arg_dirs)), m_exe(SelfPath()) {}
+	Plugin(std::vector<fs::path> arg_dirs, fs::path exe): m_arg_dirs(std::move(arg_dirs)), m_exe(std::move(exe)) {}
 
 	bool Connect() {
 		lc_callbacks cb {};
@@ -99,13 +143,22 @@ public:
 
 		lc_runner_callbacks rc {};
 		rc.user = this;
-		rc.scan = [](void* user) { static_cast<Plugin*>(user)->SendLibrary(); };
+		rc.scan = [](void* user) {
+			auto* self = static_cast<Plugin*>(user);
+			self->Post([self]() { self->SendLibrary(); });
+		};
 		rc.launch = [](void* user, const lc_launch_request* request) {
 			static_cast<Plugin*>(user)->OnLaunch(*request);
 		};
 		rc.list_achievements = [](void* user, uint64_t game, const char* external_id,
 		                          const char* game_dir) {
-			static_cast<Plugin*>(user)->OnListAchievements(game, external_id, game_dir);
+			// Reading trophy packages takes a while: on the worker, so launches don't wait
+			auto*       self = static_cast<Plugin*>(user);
+			std::string id   = external_id != nullptr ? external_id : "";
+			std::string dir  = game_dir != nullptr ? game_dir : "";
+			self->Post([self, game, id = std::move(id), dir = std::move(dir)]() {
+				self->OnListAchievements(game, id, dir);
+			});
 		};
 
 		const std::string name = std::string("Kyty ") + KYTY_VERSION;
@@ -122,16 +175,49 @@ public:
 	}
 
 	int Run() {
+		m_worker = std::thread([this]() { Work(); });
 		SendSettings();
-		SendLibrary();
+		{
+			// The first library has the setting's folders in it, so their games don't flicker
+			// to not installed on every start
+			std::unique_lock lock(m_mutex);
+			m_cv.wait_for(lock, GAME_DIRS_WAIT, [this]() { return m_have_game_dirs || m_closed; });
+			m_started = true;
+		}
+		Post([this]() { SendLibrary(); });
+
 		std::unique_lock lock(m_mutex);
-		m_closed_cv.wait(lock, [this]() { return m_closed; });
+		m_cv.wait(lock, [this]() { return m_closed; });
 		lock.unlock();
+		m_worker.join();
 		lc_close(m_session);
 		return 0;
 	}
 
 private:
+	// Scans and trophy lists run one at a time on the worker, in order, so the library sent last
+	// is always the newest
+	void Post(std::function<void()> job) {
+		std::lock_guard lock(m_mutex);
+		m_jobs.push_back(std::move(job));
+		m_cv.notify_all();
+	}
+
+	void Work() {
+		std::unique_lock lock(m_mutex);
+		for (;;) {
+			m_cv.wait(lock, [this]() { return m_closed || !m_jobs.empty(); });
+			if (m_closed) {
+				return;
+			}
+			auto job = std::move(m_jobs.front());
+			m_jobs.pop_front();
+			lock.unlock();
+			job();
+			lock.lock();
+		}
+	}
+
 	void SendSettings() {
 		const auto rows = Settings::PluginRows();
 
@@ -226,8 +312,10 @@ private:
 		{
 			std::lock_guard lock(m_mutex);
 			if (k == GAME_DIRS_KEY) {
-				m_setting_dirs = SplitFolders(value != nullptr ? value : "");
-				rescan         = true;
+				m_setting_dirs   = SplitFolders(value != nullptr ? value : "");
+				m_have_game_dirs = true;
+				rescan           = m_started; // Before that, the first library has them
+				m_cv.notify_all();
 			} else if (value != nullptr) {
 				m_values[k] = value;
 			} else {
@@ -235,7 +323,7 @@ private:
 			}
 		}
 		if (rescan) {
-			SendLibrary();
+			Post([this]() { SendLibrary(); });
 		}
 	}
 
@@ -263,7 +351,16 @@ private:
 			return;
 		}
 
-		std::vector<std::string> args = {"--game", dir};
+		// The player's per-game arguments replace the default ones, as for launcher-core's runners
+		std::vector<std::string> args;
+		const std::string        title_id = request.external_id != nullptr ? request.external_id : "";
+		for (size_t i = 0; i < request.arg_count; i++) {
+			args.push_back(Substitute(request.args[i], dir, title_id));
+		}
+		if (std::ranges::find(args, std::string("--game")) == args.end()) {
+			args.insert(args.begin(), {"--game", dir});
+		}
+		args.emplace_back(NO_CONFIGURE_FLAG);
 		{
 			std::lock_guard lock(m_mutex);
 			for (const auto& [key, value]: m_values) {
@@ -275,11 +372,8 @@ private:
 				}
 			}
 		}
-		for (size_t i = 0; i < request.arg_count; i++) {
-			args.emplace_back(request.args[i]);
-		}
-
 		const std::string        exe = Common::PathToString(m_exe);
+		const std::string        cwd = Common::PathToString(m_exe.parent_path());
 		std::vector<const char*> argv;
 		for (const auto& a: args) {
 			argv.push_back(a.c_str());
@@ -288,12 +382,14 @@ private:
 		spawn.exe       = exe.c_str();
 		spawn.args      = argv.data();
 		spawn.arg_count = argv.size();
-		// cwd stays the executable's folder, where Kyty keeps saves, trophies and caches
+		// The executable's folder, where Kyty keeps saves, trophies and caches, as for
+		// launcher-core's runners (launcherd itself would leave its own)
+		spawn.cwd = cwd.c_str();
 		lc_launch_spawn(m_session, request.launch, &spawn);
 	}
 
-	void OnListAchievements(uint64_t game, const char* external_id, const char* game_dir) {
-		fs::path dir = Common::PathFromUtf8(game_dir != nullptr ? game_dir : "");
+	void OnListAchievements(uint64_t game, const std::string& external_id, const std::string& game_dir) {
+		fs::path dir = Common::PathFromUtf8(game_dir);
 		Config::ConfigOptions cfg;
 		{
 			std::lock_guard lock(m_mutex);
@@ -334,7 +430,7 @@ private:
 	void OnClosed() {
 		std::lock_guard lock(m_mutex);
 		m_closed = true;
-		m_closed_cv.notify_all();
+		m_cv.notify_all();
 	}
 
 	std::vector<fs::path> m_arg_dirs;
@@ -342,8 +438,12 @@ private:
 	lc_session*           m_session = nullptr;
 
 	std::mutex                         m_mutex;
-	std::condition_variable            m_closed_cv;
-	bool                               m_closed = false;
+	std::condition_variable            m_cv; // Closed, game folders came, or a job
+	bool                               m_closed         = false;
+	bool                               m_have_game_dirs = false;
+	bool                               m_started        = false; // The first library is queued
+	std::deque<std::function<void()>>  m_jobs;
+	std::thread                        m_worker;
 	std::vector<fs::path>              m_setting_dirs;
 	std::map<std::string, std::string> m_values; // The settings launcherd sent, by Kyty's keys
 	Launcher::Library                  m_library;
@@ -366,7 +466,7 @@ int Run(int argc, char* argv[]) {
 			return 1;
 		}
 	}
-	Plugin plugin(std::move(dirs));
+	Plugin plugin(std::move(dirs), ExePath(argv[0]));
 	if (!plugin.Connect()) {
 		return 1;
 	}
