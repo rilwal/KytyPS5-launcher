@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Kyty's options for the launcher, which shows them in its own settings UI (the launcher's
 // docs/plugin-api.md, "Emulator settings"). Keys are the command-line option names without the
@@ -26,6 +27,25 @@ std::string Apply(Config::ConfigOptions& cfg, std::string_view key,
 
 // Whether the setting can change while a game runs (the launcher sends those with `setting`).
 [[nodiscard]] bool IsLive(std::string_view key);
+
+// A setting as a row of Kyty's page in the launcher's settings, when Kyty is the launcher's plugin
+// (launcherPlugin.h). Numbers are offered as a choice of steps.
+struct Row {
+	enum class Kind { Toggle, Choice, Text };
+	std::string              key;
+	std::string              label;
+	std::string              section;
+	Kind                     kind = Kind::Toggle;
+	std::vector<std::string> choices; // Choice only
+	std::string              default_value;
+	bool                     live = false;
+};
+
+// The settings worth a row in the launcher, in order: a curated few of Describe's.
+[[nodiscard]] std::vector<Row> PluginRows();
+
+// What a spawned game gets on its command line for one setting: a value Apply reads.
+inline constexpr char SettingFlag[] = "--launcher-setting";
 
 } // namespace Common::Launcher::Settings
 

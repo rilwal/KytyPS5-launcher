@@ -69,9 +69,9 @@ static std::string TitleId(const std::filesystem::path& game_dir) {
 	return json["titleId"].get<std::string>();
 }
 
-std::string ListGameTrophies(const std::filesystem::path& game_dir,
-                             const std::filesystem::path& root, int user_id,
-                             int console_language) {
+std::vector<Achievement> GameTrophies(const std::filesystem::path& game_dir,
+                                      const std::filesystem::path& root, int user_id,
+                                      int console_language) {
 	const std::string        title_id = TitleId(game_dir);
 	std::vector<Achievement> all;
 	for (uint32_t label = 0; label < MAX_SERVICE_LABELS; label++) {
@@ -88,7 +88,13 @@ std::string ListGameTrophies(const std::filesystem::path& game_dir,
 		all.insert(all.end(), std::make_move_iterator(list.begin()),
 		           std::make_move_iterator(list.end()));
 	}
-	return AchievementListJson(all);
+	return all;
+}
+
+std::string ListGameTrophies(const std::filesystem::path& game_dir,
+                             const std::filesystem::path& root, int user_id,
+                             int console_language) {
+	return AchievementListJson(GameTrophies(game_dir, root, user_id, console_language));
 }
 
 } // namespace Common::Launcher

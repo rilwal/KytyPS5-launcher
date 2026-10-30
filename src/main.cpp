@@ -11,6 +11,7 @@
 #include "common/virtualMemory.h"
 #include "emulator.h"
 #include "launcherMode.h"
+#include "launcherPlugin.h"
 #include "kytyGitVersion.h"
 
 #include <algorithm>
@@ -118,6 +119,9 @@ static void PrintUsage() {
 	::printf("  --launcher-describe-settings         Print the settings it can show, as JSON.\n");
 	::printf("  --launcher-list-trophies <dir>       Print a game's trophies and unlocks, as JSON.\n");
 	::printf("  --launcher-self-test <dir>           Check the messages against its examples.\n");
+	::printf("  --launcher-plugin [--game-dir <dir>] Run as the launcher's plugin for Kyty's games.\n");
+	::printf("\nFor games the plugin starts:\n");
+	::printf("  --launcher-setting <key>=<value>     A launcher setting, by its key. Repeatable.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -297,6 +301,19 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				         value.c_str());
 				return false;
 			}
+		} else if (arg == Common::Launcher::Settings::SettingFlag) {
+			const auto split = value.find('=');
+			if (split == std::string::npos) {
+				::printf("invalid %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+			const auto error = Common::Launcher::Settings::Apply(
+			    options.config, std::string_view(value).substr(0, split), value.substr(split + 1));
+			if (!error.empty()) {
+				::printf("%s\n", error.c_str());
+				return false;
+			}
+			options.launcher_settings = true;
 		} else if (arg == "--guest-exec") {
 			options.elf = Common::PathFromUtf8(Common::FixFilenameSlash(value));
 			options.config.guest_arguments.assign(argv + i + 1, argv + argc);
@@ -503,6 +520,10 @@ static int Main(int argc, char* argv[]) {
 	RunOptions options;
 	bool       show_help = false;
 
+	if (LauncherPlugin::IsPluginLaunch(argc, argv)) {
+		return LauncherPlugin::Run(argc, argv);
+	}
+
 	if (argc < 2) {
 		PrintUsage();
 		return 0;
@@ -525,7 +546,7 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
-	LauncherMode::Start(options.config);
+	LauncherMode::Start(options.config, !options.launcher_settings);
 
 	Run(options);
 
