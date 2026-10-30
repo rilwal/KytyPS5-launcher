@@ -25,6 +25,8 @@ changes and Kyty runs as before.
 | The game opens its trophy set | `achievements`: every trophy with the stored unlocks |
 | A trophy (and maybe the platinum) unlocks | `unlocked {id, at}` per trophy |
 | Quick menu opened or closed | the guest pauses or resumes, then `paused` |
+| The window's size, with `ready` and on every change | `view {width, height}` (composited overlay) |
+| The frame the quick menu opened over | `capture_surface {id, width, height}` (composited overlay) |
 | A fatal error (`EXIT`, failed checks) | `failed {reason, code: "fatal_error"}` |
 | The game folder or options are invalid | `failed {code: "invalid_file_or_folder"}` |
 | `quit` | the window loop ends as on closing the window: the pipeline cache is saved, then Kyty exits |
@@ -36,6 +38,27 @@ first (`"1:12"`). Only the configured user's trophies (`--user-id`) are reported
 
 Pausing uses the same path as the OS sending the app to the background: the present thread keeps
 showing the last frame and the guest's vblanks stop.
+
+## Quick menu in the game window
+
+On Linux, Kyty declares `composited_overlay` and draws the launcher's quick menu into its own
+frames, so the menu shows over the game (fullscreen too) and the launcher's window stays where it
+is. It follows the launcher's "Composited overlay" protocol (`docs/plugin-api.md` there):
+
+- The GPU needs `VK_EXT_external_memory_dma_buf`, `VK_KHR_external_memory_fd` and
+  `VK_EXT_image_drm_format_modifier`. Kyty turns them on when they're there, and sends `view` only
+  then, so on a GPU without them the launcher brings its window to the front as before.
+- On `overlay_opened` the guest pauses, and the next present copies the frozen frame into a linear
+  dma-buf for the launcher (`capture_surface`), which draws the menu over it.
+- `overlay_surface` names the launcher's socket and its buffers; Kyty fetches the dma-bufs from it
+  (`src/common/launcher/overlayPorts.cpp`) and imports them into Vulkan.
+- While `overlay_visible` is on, every present draws the newest buffer the launcher published over
+  the whole window, after the game's frame and Kyty's own overlays
+  (`src/graphics/presentation/launcherOverlay.cpp`). The paused guest keeps presenting its last
+  frame, so the menu animates.
+
+macOS (IOSurfaces over Mach ports) and Windows aren't done; there the launcher's window comes to
+the front.
 
 ## Settings
 
@@ -66,6 +89,6 @@ or a game-launcher checkout's when `KYTY_LAUNCHER_EXAMPLES_DIR` points at it.
 
 ## Not done yet
 
-- Drawing the launcher's quick menu into Kyty's frames (`composited_overlay`). Until then the
-  launcher brings its own window to the front over the game.
+- The composited quick menu on macOS and Windows.
+- An HDR game's frame is copied for the menu's background without tone mapping, so it looks off.
 - Shader compilation progress as an `activity`.

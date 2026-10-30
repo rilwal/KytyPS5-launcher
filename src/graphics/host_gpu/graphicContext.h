@@ -39,6 +39,8 @@ struct GraphicContext {
 	bool                               occlusion_queries_enabled             = false;
 	bool                               occlusion_query_precise_enabled       = false;
 	bool                               supports_block_texel_view              = false;
+	// Linear images can be shared with other processes as dma-bufs (the launcher's overlay)
+	bool                               dma_buf_sharing_enabled               = false;
 	bool                                      mesh_shader_enabled                   = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;

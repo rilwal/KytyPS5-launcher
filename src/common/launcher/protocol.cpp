@@ -161,6 +161,14 @@ Message OverlayItemsMsg(const std::vector<Setting>& items) {
 	return Make({{"type", "overlay_items"}, {"items", std::move(list)}});
 }
 
+Message ViewMsg(uint32_t width, uint32_t height) {
+	return Make({{"type", "view"}, {"width", width}, {"height", height}});
+}
+
+Message CaptureSurfaceMsg(uint32_t id, uint32_t width, uint32_t height) {
+	return Make({{"type", "capture_surface"}, {"id", id}, {"width", width}, {"height", height}});
+}
+
 // A SettingValue as text: externally tagged ({"Text": "150"}, {"Bool": true}), or a plain JSON
 // value. Null means the default.
 static std::optional<std::string> ValueText(const Json& value) {
@@ -201,6 +209,26 @@ HostMessage ParseHost(std::string_view frame) {
 	msg.key      = text("key");
 	msg.server   = text("server");
 	msg.encoding = text("encoding");
+	msg.service  = text("service");
+	const auto read_u32 = [&](const char* name) {
+		const auto it = obj.find(name);
+		return it != obj.end() && it->is_number_unsigned() && it->get<uint64_t>() <= UINT32_MAX
+		           ? it->get<uint32_t>()
+		           : 0u;
+	};
+	msg.header = read_u32("header");
+	msg.width  = read_u32("width");
+	msg.height = read_u32("height");
+	if (const auto it = obj.find("buffers"); it != obj.end() && it->is_array()) {
+		for (const auto& id: *it) {
+			if (id.is_number_unsigned() && id.get<uint64_t>() <= UINT32_MAX) {
+				msg.buffers.push_back(id.get<uint32_t>());
+			}
+		}
+	}
+	if (const auto it = obj.find("visible"); it != obj.end() && it->is_boolean()) {
+		msg.visible = it->get<bool>();
+	}
 	if (const auto it = obj.find("api"); it != obj.end() && it->is_number_integer()) {
 		msg.api = it->get<int>();
 	}
@@ -316,6 +344,8 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 	slot.value         = "1";
 	slot.default_value = "1";
 	check(OverlayItemsMsg({slot}));
+	check(ViewMsg(3600, 2338));
+	check(CaptureSurfaceMsg(20, 3600, 2338));
 
 	// Everything Kyty reads, from the launcher's examples. The values are the ones its
 	// crates/proto/tests/examples.rs writes: a field it renamed reads as empty here.
@@ -344,6 +374,14 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 	if (const auto msg = host("configure")) {
 		const ConfigureValues want {{"Video.Renderer", "Vulkan"}, {"Video.Resolution Scale", "150"}};
 		expect("configure", msg->values == want);
+	}
+	if (const auto msg = host("overlay_surface")) {
+		expect("overlay_surface", msg->buffers == std::vector<uint32_t> {11, 12, 13} &&
+		                              msg->header == 10 && !msg->service.empty() &&
+		                              msg->width == 1920 && msg->height == 1080);
+	}
+	if (const auto msg = host("overlay_visible")) {
+		expect("overlay_visible", msg->visible);
 	}
 	// Only their type is read
 	for (std::string_view type: {"quit", "overlay_opened", "overlay_closed"}) {
