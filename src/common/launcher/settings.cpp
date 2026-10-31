@@ -186,6 +186,57 @@ std::string Describe() {
 	return rows.dump(1, '\t');
 }
 
+std::vector<Row> PluginRows() {
+	const ConfigOptions defaults;
+	std::vector<Row>    rows;
+	for (const auto& entry: ENTRIES) {
+		const Entry* e = &entry;
+		Row          row;
+		row.key           = std::string(e->key);
+		row.label         = std::string(e->label);
+		row.section       = std::string(e->section);
+		row.default_value = ValueOf(*e, defaults);
+		row.live          = e->live;
+		std::visit(
+		    [&](const auto& kind) {
+			    using K = std::decay_t<decltype(kind)>;
+			    if constexpr (std::is_same_v<K, Toggle>) {
+				    row.kind = Row::Kind::Toggle;
+			    } else if constexpr (std::is_same_v<K, Text>) {
+				    row.kind = Row::Kind::Text;
+			    } else if constexpr (std::is_same_v<K, PresentModeChoice>) {
+				    row.kind = Row::Kind::Choice;
+				    row.choices.assign(PRESENT_MODES.begin(), PRESENT_MODES.end());
+			    } else if constexpr (std::is_same_v<K, Resolution>) {
+				    row.kind = Row::Kind::Choice;
+				    row.choices.assign(RESOLUTIONS.begin(), RESOLUTIONS.end());
+			    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
+				    row.kind = Row::Kind::Choice;
+				    row.choices.assign(LANGUAGES.begin(), LANGUAGES.end());
+			    } else {
+				    // At most 25 steps, always with the default among them
+				    row.kind       = Row::Kind::Choice;
+				    const auto lo  = static_cast<int64_t>(kind.min);
+				    const auto hi  = static_cast<int64_t>(kind.max);
+				    const auto gap = std::max<int64_t>(1, (hi - lo + 23) / 24);
+				    for (int64_t v = lo; v <= hi; v += gap) {
+					    row.choices.push_back(std::to_string(v));
+				    }
+				    if (row.choices.back() != std::to_string(hi)) {
+					    row.choices.push_back(std::to_string(hi));
+				    }
+				    if (std::ranges::find(row.choices, row.default_value) == row.choices.end()) {
+					    row.choices.push_back(row.default_value);
+					    std::ranges::sort(row.choices, {}, [](const std::string& c) { return std::stoll(c); });
+				    }
+			    }
+		    },
+		    e->kind);
+		rows.push_back(std::move(row));
+	}
+	return rows;
+}
+
 bool IsLive(std::string_view key) {
 	const Entry* e = Find(key);
 	return e != nullptr && e->live;

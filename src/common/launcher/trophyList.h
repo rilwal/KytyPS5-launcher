@@ -28,6 +28,12 @@ inline constexpr char ListTrophiesFlag[] = "--launcher-list-trophies";
                                                   const Trophies::UnlockData& unlocks,
                                                   uint32_t service_label);
 
+// Every trophy set of the game in `game_dir`, with the unlocks Kyty keeps for `user_id` under
+// `root`. Empty if the game has no trophies.
+[[nodiscard]] std::vector<Achievement> GameTrophies(const std::filesystem::path& game_dir,
+                                                    const std::filesystem::path& root,
+                                                    int user_id, int console_language);
+
 // Every trophy set of the game in `game_dir` (sce_sys/trophy2/trophyNN.ucp), with the unlocks
 // Kyty keeps for `user_id` under `root` (the folder Kyty runs in), as the launcher's
 // achievement_list: a JSON array. Empty if the game has no trophies.

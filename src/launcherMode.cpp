@@ -194,7 +194,7 @@ static Launcher::Handlers MakeHandlers() {
 	return handlers;
 }
 
-bool Start(Config::ConfigOptions& config) {
+bool Start(Config::ConfigOptions& config, bool wait_for_configure) {
 	if (!Launcher::EnvPresent()) {
 		return false;
 	}
@@ -216,7 +216,9 @@ bool Start(Config::ConfigOptions& config) {
 
 	// Only the options in memory change; Kyty has no config file of its own to write.
 	std::string errors;
-	if (const auto values = session->WaitForConfigure(CONFIGURE_TIMEOUT)) {
+	const auto values = wait_for_configure ? session->WaitForConfigure(CONFIGURE_TIMEOUT)
+	                                       : std::optional<Launcher::ConfigureValues> {};
+	if (values) {
 		for (const auto& [key, value]: *values) {
 			if (const auto error = Launcher::Settings::Apply(config, key, value); !error.empty()) {
 				LOGF("[Launcher] configure: %s\n", error.c_str());

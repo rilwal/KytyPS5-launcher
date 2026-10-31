@@ -1,4 +1,5 @@
 #include "common/emulatorConfig.h"
+#include "common/launcher/library.h"
 #include "common/launcher/protocol.h"
 #include "common/launcher/settings.h"
 #include "common/launcher/trophyList.h"
@@ -6,6 +7,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <string>
 
@@ -99,6 +102,75 @@ void TestSettings() {
 	      "only the performance overlay changes in game");
 }
 
+void TestPluginRows() {
+	const auto rows = Launcher::Settings::PluginRows();
+	const auto described = nlohmann::json::parse(Launcher::Settings::Describe());
+	Check(rows.size() == described.size() && rows.front().key == described.front()["key"].get<std::string>(),
+	      "every described setting, in order");
+	for (const char* key: {"ps5-pro", "emulate-psn"}) {
+		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
+		      "newer settings get a row too");
+	}
+	for (const auto& row: rows) {
+		Config::ConfigOptions cfg;
+		Check(Launcher::Settings::Apply(cfg, row.key, row.default_value).empty(),
+		      "each row's default applies");
+		for (const auto& choice: row.choices) {
+			Check(Launcher::Settings::Apply(cfg, row.key, choice).empty(), "each choice applies");
+		}
+	}
+	const auto vblank = std::ranges::find(rows, std::string("vblank-frequency"),
+	                                      &Launcher::Settings::Row::key);
+	Check(vblank != rows.end() && vblank->choices.size() <= 26 &&
+	          std::ranges::find(vblank->choices, vblank->default_value) != vblank->choices.end(),
+	      "a number is offered as steps that include its default");
+}
+
+void Write(const std::filesystem::path& path, const std::string& text) {
+	std::filesystem::create_directories(path.parent_path());
+	std::ofstream(path, std::ios::binary) << text;
+}
+
+void TestLibrary() {
+	namespace fs   = std::filesystem;
+	const auto root = fs::temp_directory_path() / "kyty-library-test";
+	fs::remove_all(root);
+	// A folder of games: a PS5 one, a PS4 one, one without an eboot, and a stray folder
+	const auto ps5 = root / "games" / "astro";
+	Write(ps5 / "sce_sys" / "param.json",
+	      R"({"titleId":"ppsa21564","localizedParameters":{"defaultLanguage":"en-US","en-US":{"titleName":"ASTRO BOT"}}})");
+	Write(ps5 / "eboot.bin", "");
+	Write(ps5 / "sce_sys" / "icon0.png", "");
+	Write(ps5 / "sce_sys" / "pic0.png", "");
+	// A PSF with TITLE and TITLE_ID
+	std::string sfo("\0PSF\1\1\0\0", 8);
+	const auto  u32 = [](uint32_t v) { return std::string(reinterpret_cast<const char*>(&v), 4); };
+	const auto  u16 = [](uint16_t v) { return std::string(reinterpret_cast<const char*>(&v), 2); };
+	const std::string keys = std::string("TITLE\0TITLE_ID\0", 15);
+	const std::string vals = std::string("Bloodborne\0\0CUSA00900\0\0\0", 24);
+	sfo += u32(20 + 32) + u32(20 + 32 + 15) + u32(2);
+	sfo += u16(0) + u16(0x0204) + u32(11) + u32(12) + u32(0);
+	sfo += u16(6) + u16(0x0204) + u32(10) + u32(12) + u32(12);
+	sfo += keys + vals;
+	const auto ps4 = root / "games" / "bloodborne";
+	Write(ps4 / "sce_sys" / "param.sfo", sfo);
+	Write(ps4 / "eboot.bin", "");
+	Write(root / "games" / "broken" / "sce_sys" / "param.json", R"({"titleId":"PPSA00001"})");
+	fs::create_directories(root / "games" / "not-a-game");
+
+	const auto library = Launcher::ScanLibrary({root / "games", ps5, root / "missing"});
+	Check(library.games.size() == 2, "both games, the second sight of one ignored");
+	Check(library.games[0].title_id == "CUSA00900" && library.games[0].title == "Bloodborne" &&
+	          library.games[0].platform == "Ps4" && library.games[0].icon.empty(),
+	      "a PS4 game from param.sfo");
+	Check(library.games[1].title_id == "PPSA21564" && library.games[1].title == "ASTRO BOT" &&
+	          library.games[1].platform == "Ps5" && !library.games[1].icon.empty() &&
+	          library.games[1].hero.filename() == "pic0.png",
+	      "a PS5 game from param.json, with its art, the id in upper case");
+	Check(library.warnings.size() == 2, "the game without an eboot and the missing folder warn");
+	fs::remove_all(root);
+}
+
 void TestHostMessages() {
 	const auto setting = Launcher::ParseHost(R"({"type":"setting","key":"hdr","value":{"Bool":true}})");
 	Check(setting.type == "setting" && setting.key == "hdr" && setting.value == "true",
@@ -113,6 +185,8 @@ void TestHostMessages() {
 int main(int argc, char* argv[]) {
 	TestTrophyList();
 	TestSettings();
+	TestPluginRows();
+	TestLibrary();
 	TestHostMessages();
 
 	// With the launcher's examples (game-launcher docs/plugin-api/examples), check the messages

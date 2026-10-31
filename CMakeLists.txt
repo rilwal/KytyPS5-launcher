@@ -333,6 +333,8 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/emulator.cpp"
 	"${KYTY_SOURCE_DIR}/launcherMode.h"
 	"${KYTY_SOURCE_DIR}/launcherMode.cpp"
+	"${KYTY_SOURCE_DIR}/launcherPlugin.h"
+	"${KYTY_SOURCE_DIR}/launcherPlugin.cpp"
 )
 list(REMOVE_DUPLICATES kyty_emulator_src)
 
@@ -340,7 +342,11 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
-set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
+# The launcher's client library (rilwal/game-launcher's client/), for running as its plugin
+set(LAUNCHER_CLIENT_VULKAN OFF CACHE BOOL "" FORCE)
+add_subdirectory("${PROJECT_SOURCE_DIR}/3rdparty/launcher-client/client" "${CMAKE_CURRENT_BINARY_DIR}/launcher-client" EXCLUDE_FROM_ALL)
+
+set(kyty_emulator_link_libraries common launcher_client Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
 
 # Linux system libraries.
 if(LINUX)

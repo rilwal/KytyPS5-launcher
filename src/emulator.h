@@ -16,6 +16,9 @@ struct RunOptions {
 	std::filesystem::path                game_patch;
 	std::filesystem::path                addcont_dir;
 	std::vector<Common::AddContentEntry> addcont;
+	// Kyty's own plugin started the game, with the launcher's settings on the command line
+	// (--launcher-setting), so launcher mode doesn't wait for configure (--launcher-no-configure).
+	bool skip_configure = false;
 };
 
 void Run(const RunOptions& options);
