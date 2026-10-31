@@ -2,11 +2,35 @@
 
 This fork of KytyPS5 works with the [game launcher](https://github.com/rilwal/game-launcher) as a
 patched emulator (the launcher's design decision D26). The launcher draws all UI; Kyty reports to
-it over the launcher's plugin protocol (`docs/plugin-api.md` there) as a `session` plugin.
+it over the launcher's plugin protocol (`docs/plugin-api.md` there), through the launcher's client
+library, vendored in `3rdparty/launcher-client`.
 
-## How it starts
+Kyty is the launcher's plugin for its own games: the launcher has no Kyty code of its own.
 
-The launcher's Kyty runner starts `kyty_emulator --game <game folder>` with two environment
+```toml
+[plugins.kyty]
+exe = "/path/to/kyty_emulator"
+[plugins.kyty.settings]
+game_dirs = ["~/Roms/PS5"]
+```
+
+## The plugin
+
+Started with no arguments (or `--launcher-plugin [--game-dir <folders>]`) and the launcher's
+environment, `kyty_emulator` is a plugin runner (`src/launcherPlugin.cpp`):
+
+- `library`: the games in its game folders, each a game's folder or a folder of them, one level
+  deep, with their titles, title ids, icons and backgrounds.
+- `launch`: answered with a `spawn` of itself, `--game <game folder>`, run in its own folder (where
+  Kyty keeps saves, trophies and caches). A player's per-game arguments replace those, with
+  `{game_dir}`, `{boot}` and `{title_id}` filled in.
+- `achievements`: a game's trophies and stored unlocks, before it's ever played.
+- `settings` and `game_settings`, below. On Linux its `hello` also says its games draw the quick
+  menu themselves (`composited_overlay`).
+
+## How a game starts
+
+The plugin has launcherd start `kyty_emulator --game <game folder>` with two environment
 variables:
 
 - `LAUNCHER_ENDPOINT`: the launcher's socket (Unix) or named pipe (Windows).
@@ -62,11 +86,18 @@ the front.
 
 ## Settings
 
-`kyty_emulator --launcher-describe-settings` prints the options the launcher can show, as JSON
-(`src/common/launcher/settings.cpp`). Keys are the command-line options without their dashes
-(`present-mode`), plus `resolution` for the window size. The launcher stores the player's values,
-globally and per game, and sends them with `configure` before boot; Kyty applies them in memory
-over its command line. `perf-overlay` is live: it can change from the launcher while a game runs.
+The options the launcher shows are in `src/common/launcher/settings.cpp`. Keys are the
+command-line options without their dashes (`present-mode`), plus `resolution` for the window size.
+They're on Kyty's page, under Emulators:
+
+- The plugin's own settings: the game folders (the launcher's folder picker), the user name and
+  the console language, which the plugin lists trophies in. It passes the last two to the games it
+  starts as `--launcher-setting <key>=<value>`.
+- Everything else is a game setting (`game_settings`): toggles and choices, numbers being offered
+  as steps. The launcher stores the player's values, globally and per game, and sends them with
+  `configure` before boot; Kyty applies them in memory over its command line. `perf-overlay` is
+  live: it can change from the launcher while a game runs.
+
 `console-language` is a choice of language names; Kyty also takes the number, as on its command line.
 
 Kyty adds no rows of its own to the quick menu, so the launcher's stored value stays the one that
@@ -76,8 +107,8 @@ counts. F2 still shows or hides the performance overlay, for that session only.
 
 `kyty_emulator --launcher-list-trophies <game folder> [--user-id <n>] [--console-language <n>]`
 prints a game's trophies with the unlocks Kyty keeps for that user, as the launcher's achievement
-list. Unlocks are read from `_Trophies` in the current folder, as when Kyty plays, so run it from
-the folder Kyty runs games in (the launcher uses the executable's folder).
+list, as the plugin sends it. Unlocks are read from `_Trophies` in the current folder, as when Kyty
+plays, so run it from the folder Kyty runs games in (the executable's folder).
 
 ## Checking the protocol
 
@@ -89,6 +120,9 @@ or a game-launcher checkout's when `KYTY_LAUNCHER_EXAMPLES_DIR` points at it.
 
 ## Not done yet
 
+- The user name and console language are global only, since game settings can't be text and the
+  plugin isn't sent their values (it needs the language for trophies). Trophy lists aren't sent
+  again when the language changes.
 - The composited quick menu on macOS and Windows.
 - An HDR game's frame is copied for the menu's background without tone mapping, so it looks off.
 - Shader compilation progress as an `activity`.

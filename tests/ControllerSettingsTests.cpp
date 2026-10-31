@@ -712,6 +712,49 @@ void TestUnreadPressSurvivesStickBurst() {
 
 } // namespace
 
+// The launcher's quick menu has the pad: the game gets nothing new, and a button still held when
+// the menu closes (the press that chose an item) reaches it only once released and pressed again.
+void TestLauncherHold() {
+	Controller              controller;
+	std::array<PadData, 64> data {};
+	const auto drained = [&]() {
+		const int n = PadRead(1, data.data(), 64);
+		for (int i = 0; i < n; i++) {
+			if (data[i].buttons != 0 || data[i].analog_buttons_r2 != 0) {
+				return false;
+			}
+		}
+		return n >= 1;
+	};
+	Check(drained(), "the pad started with input");
+	HoldForLauncher(true);
+	SetButton(1, PAD_BUTTON_CROSS, true);
+	SetAxis(1, Axis::TriggerRight, 255);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, true, 0.5f, 0.5f);
+	Check(drained(), "input reached the game while the launcher's menu had the pad");
+	HoldForLauncher(false);
+	Check(drained() && PadReadState(1, &data[0]) == 0 && data[0].buttons == 0 &&
+	          data[0].analog_buttons_r2 == 0,
+	      "buttons held as the menu closed reached the game");
+	SetAxis(1, Axis::TriggerRight, 128);
+	Check(PadReadState(1, &data[0]) == 0 && data[0].buttons == 0 &&
+	          data[0].analog_buttons_r2 == 0,
+	      "a trigger eased off but still held after the menu closed reached the game");
+	SetButton(1, PAD_BUTTON_CROSS, false);
+	SetAxis(1, Axis::TriggerRight, 0);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, false, 0.5f, 0.5f);
+	SetButton(1, PAD_BUTTON_CROSS, true);
+	SetAxis(1, Axis::TriggerRight, 255);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, true, 0.5f, 0.5f);
+	Check(PadReadState(1, &data[0]) == 0 &&
+	          data[0].buttons == (PAD_BUTTON_CROSS | PAD_BUTTON_R2 | PAD_BUTTON_TOUCH_PAD) &&
+	          data[0].analog_buttons_r2 == 255,
+	      "a button released after the menu closed stayed hidden");
+	SetButton(1, PAD_BUTTON_CROSS, false);
+	SetAxis(1, Axis::TriggerRight, 0);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, false, 0.5f, 0.5f);
+}
+
 int main() {
 	Config::Initialize();
 	TestPlayerUserIds();
@@ -726,6 +769,7 @@ int main() {
 	TestUnreadPressSurvivesStickBurst();
 	TestMultiplayerRouting();
 	TestDedicatedKeyboardOutputs();
+	TestLauncherHold();
 	Config::Shutdown();
 	return 0;
 }

@@ -64,11 +64,10 @@ void TestTrophyList() {
 }
 
 void TestSettings() {
-	const auto rows = nlohmann::json::parse(Launcher::Settings::Describe());
-	Check(rows.is_array() && !rows.empty(), "settings are described");
+	const auto rows = Launcher::Settings::PluginRows();
+	Check(!rows.empty(), "settings are described");
 	for (const auto& row: rows) {
-		Check(row.contains("key") && row.contains("label") && row.contains("section") &&
-		          row.contains("kind") && row["default"].is_string() && row["live"].is_boolean(),
+		Check(!row.key.empty() && !row.label.empty() && !row.section.empty(),
 		      "each row has the fields the launcher reads");
 	}
 
@@ -104,9 +103,17 @@ void TestSettings() {
 
 void TestPluginRows() {
 	const auto rows = Launcher::Settings::PluginRows();
-	const auto described = nlohmann::json::parse(Launcher::Settings::Describe());
-	Check(rows.size() == described.size() && rows.front().key == described.front()["key"].get<std::string>(),
-	      "every described setting, in order");
+	Check(rows.front().key == "resolution", "every setting, in order");
+	for (const auto& row: rows) {
+		const bool own = row.key == "user-name" || row.key == "console-language";
+		Check(row.runner == own, "only text and the trophy language are the plugin's own settings");
+		Check(row.runner || row.kind != Launcher::Settings::Row::Kind::Text,
+		      "game settings are toggles and choices");
+		Check(row.live == (row.key == "perf-overlay"), "only the performance overlay is live");
+	}
+	const auto perf = std::ranges::find(rows, std::string("perf-overlay"), &Launcher::Settings::Row::key);
+	Check(perf != rows.end() && perf->live && !perf->runner,
+	      "the performance overlay is a live game setting");
 	for (const char* key: {"ps5-pro", "emulate-psn"}) {
 		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
 		      "newer settings get a row too");

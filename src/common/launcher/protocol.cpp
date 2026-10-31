@@ -363,7 +363,7 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 
 	if (const auto msg = host("accepted")) {
 		// The API Kyty speaks (session.cpp)
-		expect("accepted", msg->api == 2 && msg->title == "Demon's Souls");
+		expect("accepted", msg->api == 3 && msg->title == "Demon's Souls");
 	}
 	if (const auto msg = host("setting")) {
 		expect("setting", msg->key == "api_key" && msg->value == "0123456789ABCDEF");

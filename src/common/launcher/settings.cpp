@@ -4,13 +4,11 @@
 #include <array>
 #include <charconv>
 #include <fmt/format.h>
-#include <nlohmann/json.hpp>
 #include <variant>
 
 namespace Common::Launcher::Settings {
 
 using Config::ConfigOptions;
-using Json = nlohmann::json;
 
 namespace {
 
@@ -149,42 +147,7 @@ std::string ValueOf(const Entry& e, const ConfigOptions& cfg) {
 	    e.kind);
 }
 
-Json KindJson(const Entry& e) {
-	return std::visit(
-	    [&](const auto& kind) -> Json {
-		    using K = std::decay_t<decltype(kind)>;
-		    if constexpr (std::is_same_v<K, Toggle>) {
-			    return "toggle";
-		    } else if constexpr (std::is_same_v<K, Text>) {
-			    return {{"text", Json::object()}};
-		    } else if constexpr (std::is_same_v<K, PresentModeChoice>) {
-			    return {{"choice", PRESENT_MODES}};
-		    } else if constexpr (std::is_same_v<K, Resolution>) {
-			    return {{"choice", RESOLUTIONS}};
-		    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
-			    return {{"choice", LANGUAGES}};
-		    } else {
-			    return {{"number", {{"min", kind.min}, {"max", kind.max}}}};
-		    }
-	    },
-	    e.kind);
-}
-
 } // namespace
-
-std::string Describe() {
-	const ConfigOptions defaults;
-	Json                rows = Json::array();
-	for (const auto& e: ENTRIES) {
-		rows.push_back({{"key", e.key},
-		                {"label", e.label},
-		                {"section", e.section},
-		                {"kind", KindJson(e)},
-		                {"default", ValueOf(e, defaults)},
-		                {"live", e.live}});
-	}
-	return rows.dump(1, '\t');
-}
 
 std::vector<Row> PluginRows() {
 	const ConfigOptions defaults;
@@ -197,13 +160,15 @@ std::vector<Row> PluginRows() {
 		row.section       = std::string(e->section);
 		row.default_value = ValueOf(*e, defaults);
 		row.live          = e->live;
+		row.runner        = e->key == "console-language";
 		std::visit(
 		    [&](const auto& kind) {
 			    using K = std::decay_t<decltype(kind)>;
 			    if constexpr (std::is_same_v<K, Toggle>) {
 				    row.kind = Row::Kind::Toggle;
 			    } else if constexpr (std::is_same_v<K, Text>) {
-				    row.kind = Row::Kind::Text;
+				    row.kind   = Row::Kind::Text;
+				    row.runner = true;
 			    } else if constexpr (std::is_same_v<K, PresentModeChoice>) {
 				    row.kind = Row::Kind::Choice;
 				    row.choices.assign(PRESENT_MODES.begin(), PRESENT_MODES.end());

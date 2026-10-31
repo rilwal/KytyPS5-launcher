@@ -126,6 +126,7 @@ public:
 	void ResetOrientation();
 	void ToggleGyroEmulation(int id);
 	void ResetInputState();
+	void HoldForLauncher(bool hold);
 	void GetConnectionInfo(bool* flag, int* count);
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
 	int  GetActiveControllerId();
@@ -178,6 +179,25 @@ private:
 	uint64_t               m_vibration_until = 0;
 	PadTriggerEffectParam  m_trigger_effect {};
 	PadTriggerEffectStateInformation m_trigger_state {};
+	// The launcher's quick menu has the pad: the game sees `m_frozen` and no new samples. Buttons
+	// still down when it hands the pad back stay hidden (`m_masked`) until they're released, so the
+	// press that closed the menu doesn't reach the game as a new one.
+	bool             m_launcher_hold = false;
+	uint32_t         m_masked        = 0;
+	ControllerState  m_frozen {};
+
+	[[nodiscard]] ControllerState Visible() const {
+		auto state = m_state;
+		state.buttons &= ~m_masked;
+		// A hidden trigger reads as released, its analog value too
+		if ((m_masked & PAD_BUTTON_L2) != 0) {
+			state.axes[static_cast<int>(Axis::TriggerLeft)] = 0;
+		}
+		if ((m_masked & PAD_BUTTON_R2) != 0) {
+			state.axes[static_cast<int>(Axis::TriggerRight)] = 0;
+		}
+		return state;
+	}
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
 	std::array<std::atomic<uint32_t>, 3> m_setting_steps {};
 };
@@ -505,6 +525,7 @@ void GameController::SetDevices(int active_id) {
 	m_active_id     = active_id;
 	m_connected     = new_connected;
 	m_state         = {};
+	m_masked        = 0;
 	m_gyro_time     = 0;
 	m_gyro_emulation = false;
 	m_emulated_time  = 0;
@@ -522,13 +543,20 @@ void GameController::SetDevices(int active_id) {
 // Input that changes no button or touch contact updates the newest unread sample, so a burst of
 // stick or sensor events between two reads cannot push unread button or touch changes out.
 void GameController::AddState() {
+	if (m_launcher_hold) {
+		return;
+	}
+	// A hidden button shows again once it's been released, whichever input path released it
+	// (L2 and R2 come as trigger axes, the touch pad button as a touch)
+	m_masked &= m_state.buttons;
+	const auto state = Visible();
 	if (m_states_num != 0) {
 		const auto newest = (m_first_state + m_states_num - 1) % STATES_MAX;
 		auto&      last   = m_states[newest];
-		if (!m_obtained[newest] && last.buttons == m_state.buttons &&
-		    last.touch[0].down == m_state.touch[0].down &&
-		    last.touch[1].down == m_state.touch[1].down) {
-			last = m_state;
+		if (!m_obtained[newest] && last.buttons == state.buttons &&
+		    last.touch[0].down == state.touch[0].down &&
+		    last.touch[1].down == state.touch[1].down) {
+			last = state;
 			return;
 		}
 	}
@@ -539,7 +567,7 @@ void GameController::AddState() {
 	}
 
 	const auto index  = (m_first_state + m_states_num) % STATES_MAX;
-	m_states[index]   = m_state;
+	m_states[index]   = state;
 	m_obtained[index] = false;
 	m_states_num++;
 }
@@ -819,6 +847,7 @@ void GameController::ResetOrientation() {
 void GameController::ResetInputState() {
 	Common::LockGuard lock(m_mutex);
 	m_state.buttons = 0;
+	m_masked        = 0;
 	std::fill_n(m_state.axes, 4, 128);
 	std::fill_n(m_state.axes + 4, 2, 0);
 	UpdateTriggerEffectState();
@@ -977,7 +1006,23 @@ void GameController::ReadState(ControllerState* state, bool* flag, int* count) {
 
 	*flag  = m_connected;
 	*count = m_connected_count;
-	*state = m_state;
+	*state = m_launcher_hold ? m_frozen : Visible();
+}
+
+void GameController::HoldForLauncher(bool hold) {
+	Common::LockGuard lock(m_mutex);
+	if (hold == m_launcher_hold) {
+		return;
+	}
+	if (hold) {
+		m_frozen        = Visible();
+		m_launcher_hold = true;
+		return;
+	}
+	m_launcher_hold = false;
+	m_masked        = m_state.buttons;
+	m_state.time    = LibKernel::KernelGetProcessTime();
+	AddState();
 }
 
 int GameController::ReadStates(ControllerState* states, int states_num, bool* flag, int* count) {
@@ -1137,6 +1182,14 @@ void ResetInputState() {
 	for (const auto& player: g_players) {
 		if (player != nullptr) {
 			player->ResetInputState();
+		}
+	}
+}
+
+void HoldForLauncher(bool hold) {
+	for (const auto& player: g_players) {
+		if (player != nullptr) {
+			player->HoldForLauncher(hold);
 		}
 	}
 }
