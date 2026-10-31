@@ -300,8 +300,8 @@ public:
 private:
 	vk::SurfaceFormatKHR SelectFormat();
 	void Destroy();
-	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer,
-	                 const vk::Rect2D& rect);
+	void DrawLayer(vk::CommandBuffer command, const Presenter::Layer& layer,
+	               const vk::Rect2D& rect);
 	// Draws `view` over `rect` of the current image; `flags` as gpu_video_out_overlay.frag's
 	void DrawTexture(vk::CommandBuffer command, vk::ImageView view, uint32_t flags,
 	                 const vk::Rect2D& rect);
@@ -671,8 +671,8 @@ static vk::Rect2D FitAspect(const vk::Extent3D& source, const vk::Extent2D& targ
 	        {w, h}};
 }
 
-void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer,
-                            const vk::Rect2D& rect) {
+void Swapchain::DrawLayer(vk::CommandBuffer command, const Presenter::Layer& layer,
+                          const vk::Rect2D& rect) {
 	auto  device = m_window.graphic_ctx.device;
 	auto& frame  = *layer.frame;
 	if (frame.view == nullptr) {
@@ -684,9 +684,11 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 		RequireVulkanSuccess(device.createImageView(&view, nullptr, &frame.view),
 		                     "create video-out overlay image view");
 	}
-	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) |
-	                       (m_hdr_active ? 2u : 0u) | (frame.hdr ? 4u : 0u) |
-	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
+	// The main bus ignores alpha.
+	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) | (m_hdr_active ? 2u : 0u) |
+	                       (frame.hdr ? 4u : 0u) |
+	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u) |
+	                       (layer.bus == 0 ? 16u : 0u);
 	DrawTexture(command, frame.view, flags, rect);
 }
 
@@ -813,6 +815,8 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
                                       const Presenter::Layer& overlay, bool draw_system_overlay) {
 	EXIT_IF(m_image_index >= m_images.size());
 	auto       vk_command      = command.Handle();
+	const bool convert_source  = source != nullptr && source->hdr && !m_hdr_active;
+	const bool blit_source     = source != nullptr && !convert_source;
 	const bool draw_overlay    = overlay.frame != nullptr;
 	if (source != nullptr) {
 		source->Transit(vk_command, vk::ImageLayout::eTransferSrcOptimal,
@@ -823,10 +827,15 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 			                           {source->image.extent.width, source->image.extent.height});
 		}
 	}
+	if (convert_source) {
+		source->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
+		                vk::AccessFlagBits2::eShaderRead);
+	}
 	// The launcher's quick menu, drawn over everything
 	const auto launcher_view   = m_launcher_overlay.Acquire(vk_command);
 	const bool draw_launcher   = launcher_view != nullptr;
-	const bool draw_attachment = draw_overlay || draw_system_overlay || draw_launcher;
+	const bool draw_attachment = convert_source || draw_overlay || draw_system_overlay ||
+	                             draw_launcher;
 	if (draw_overlay) {
 		overlay.frame->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
 		                       vk::AccessFlagBits2::eShaderRead);
@@ -858,7 +867,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		const vk::ClearColorValue black {};
 		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,
 		                           &black, 1, &to_transfer.subresourceRange);
-		if (source != nullptr) {
+		if (blit_source) {
 			vk::ImageMemoryBarrier after_clear = to_transfer;
 			after_clear.srcAccessMask          = vk::AccessFlagBits::eTransferWrite;
 			after_clear.oldLayout              = vk::ImageLayout::eTransferDstOptimal;
@@ -868,7 +877,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 			                           &after_clear);
 		}
 	}
-	if (source != nullptr) {
+	if (blit_source) {
 		vk::ImageBlit region {};
 		region.srcSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
 		region.srcSubresource.mipLevel       = 0;
@@ -914,36 +923,39 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
 	                           &to_present);
 	if (draw_attachment) {
+		// Each pass blends over the color writes of the previous one.
+		to_present.srcAccessMask      = vk::AccessFlagBits::eColorAttachmentWrite;
+		to_present.oldLayout          = vk::ImageLayout::eColorAttachmentOptimal;
+		const auto attachment_barrier = [&] {
+			vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+			                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
+			                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
+			                           &to_present);
+		};
+		if (convert_source) {
+			DrawLayer(vk_command, {source, 0, false}, game_rect);
+			if (draw_overlay || draw_system_overlay || draw_launcher) {
+				attachment_barrier();
+			}
+		}
 		if (draw_overlay) {
-			DrawOverlay(vk_command, overlay, game_rect);
-			if (draw_system_overlay) {
-				to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-				to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
-				vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0,
-				                           nullptr, 1, &to_present);
+			DrawLayer(vk_command, overlay, game_rect);
+			if (draw_system_overlay || draw_launcher) {
+				attachment_barrier();
 			}
 		}
 		if (draw_system_overlay) {
 			m_system_overlay->Record(vk_command, m_image_views[m_image_index]);
 		}
 		if (draw_launcher) {
-			if (draw_overlay || draw_system_overlay) {
-				to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-				to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
-				vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0,
-				                           nullptr, 1, &to_present);
+			if (draw_system_overlay) {
+				attachment_barrier();
 			}
 			// Premultiplied BGRA8, filling the window
 			DrawTexture(vk_command, launcher_view, 1u | (m_hdr_active ? 2u : 0u),
 			            {{0, 0}, m_extent});
 		}
-		to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
 		to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
-		to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
 		to_present.newLayout     = vk::ImageLayout::ePresentSrcKHR;
 		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
 		                           vk::PipelineStageFlagBits::eAllCommands,
