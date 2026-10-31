@@ -83,6 +83,9 @@ void SetTouchPad(int id, int finger, bool down, float x, float y);
 void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us);
 void ToggleGyroEmulation(int id);
 void ResetInputState();
+// While the launcher's quick menu is open the game gets no new input, and buttons still held when
+// it closes reach the game only after they're released.
+void HoldForLauncher(bool hold);
 int  GetActiveControllerId();
 // True when the player has a keyboard or gamepad assigned.
 bool IsPlayerConnected(int player);

@@ -7,6 +7,7 @@
 #include "graphics/presentation/launcherOverlay.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/window.h"
+#include "libs/controller.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -172,6 +173,7 @@ static Launcher::Handlers MakeHandlers() {
 			Libs::Graphics::LauncherOverlay::CancelCapture();
 		}
 		Libs::Graphics::WindowSetLauncherPaused(open);
+		Libs::Controller::HoldForLauncher(open);
 		if (auto* session = Launcher::Session::Get(); session != nullptr) {
 			session->Paused(open);
 		}
