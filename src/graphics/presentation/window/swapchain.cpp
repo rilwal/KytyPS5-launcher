@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/launcherOverlay.h"
 #include "graphics/presentation/openxrHeadset.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/presenter.h"
@@ -262,7 +263,8 @@ class Swapchain final {
 public:
 	enum class Status : uint8_t { Success, Recreate, SurfaceLost };
 
-	explicit Swapchain(WindowContext& window): m_window(window) {}
+	explicit Swapchain(WindowContext& window)
+	    : m_window(window), m_launcher_overlay(window.graphic_ctx) {}
 	~Swapchain();
 	KYTY_CLASS_NO_COPY(Swapchain);
 
@@ -275,6 +277,10 @@ public:
 	                               const Presenter::Layer& overlay, bool draw_system_overlay);
 	uint64_t Submit(CommandScheduler& scheduler);
 	[[nodiscard]] Status Present();
+	[[nodiscard]] LauncherOverlay::Renderer& LauncherRenderer() noexcept {
+		return m_launcher_overlay;
+	}
+	[[nodiscard]] vk::Extent2D Extent() const noexcept { return m_extent; }
 
 	[[nodiscard]] uint32_t ImageCount() const noexcept {
 		return static_cast<uint32_t>(m_images.size());
@@ -291,6 +297,9 @@ private:
 	vk::SurfaceFormatKHR SelectFormat();
 	void Destroy();
 	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer,
+	                 const vk::Rect2D& rect);
+	// Draws `view` over `rect` of the current image; `flags` as gpu_video_out_overlay.frag's
+	void DrawTexture(vk::CommandBuffer command, vk::ImageView view, uint32_t flags,
 	                 const vk::Rect2D& rect);
 
 	WindowContext&   m_window;
@@ -314,6 +323,8 @@ private:
 	vk::Sampler                    m_overlay_sampler     = nullptr;
 	uint32_t                       m_image_index         = static_cast<uint32_t>(-1);
 	uint32_t                       m_frame_index         = 0;
+	// Destroyed after the destructor's Destroy() has waited for the queue
+	LauncherOverlay::Renderer      m_launcher_overlay;
 };
 
 struct Presenter::Impl {
@@ -655,6 +666,25 @@ static vk::Rect2D FitAspect(const vk::Extent3D& source, const vk::Extent2D& targ
 
 void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer,
                             const vk::Rect2D& rect) {
+	auto  device = m_window.graphic_ctx.device;
+	auto& frame  = *layer.frame;
+	if (frame.view == nullptr) {
+		vk::ImageViewCreateInfo view {};
+		view.image            = frame.image.image;
+		view.viewType         = vk::ImageViewType::e2D;
+		view.format           = frame.image.format;
+		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		RequireVulkanSuccess(device.createImageView(&view, nullptr, &frame.view),
+		                     "create video-out overlay image view");
+	}
+	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) |
+	                       (m_hdr_active ? 2u : 0u) | (frame.hdr ? 4u : 0u) |
+	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
+	DrawTexture(command, frame.view, flags, rect);
+}
+
+void Swapchain::DrawTexture(vk::CommandBuffer command, vk::ImageView view, uint32_t flags,
+                            const vk::Rect2D& rect) {
 	auto device = m_window.graphic_ctx.device;
 	if (m_overlay_pipeline == nullptr) {
 		vk::SamplerCreateInfo sampler {};
@@ -738,17 +768,7 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 		device.destroyShaderModule(fragment, nullptr);
 		device.destroyShaderModule(vertex, nullptr);
 	}
-	auto& frame = *layer.frame;
-	if (frame.view == nullptr) {
-		vk::ImageViewCreateInfo view {};
-		view.image            = frame.image.image;
-		view.viewType         = vk::ImageViewType::e2D;
-		view.format           = frame.image.format;
-		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-		RequireVulkanSuccess(device.createImageView(&view, nullptr, &frame.view),
-		                     "create video-out overlay image view");
-	}
-	const vk::DescriptorImageInfo image {m_overlay_sampler, frame.view,
+	const vk::DescriptorImageInfo image {m_overlay_sampler, view,
 	                                     vk::ImageLayout::eShaderReadOnlyOptimal};
 	vk::WriteDescriptorSet        write {};
 	write.dstBinding      = 0;
@@ -756,9 +776,6 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 	write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
 	write.pImageInfo      = &image;
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
-	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) |
-	                       (m_hdr_active ? 2u : 0u) | (frame.hdr ? 4u : 0u) |
-	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
 	                      sizeof(flags), &flags);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
@@ -790,11 +807,19 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	EXIT_IF(m_image_index >= m_images.size());
 	auto       vk_command      = command.Handle();
 	const bool draw_overlay    = overlay.frame != nullptr;
-	const bool draw_attachment = draw_overlay || draw_system_overlay;
 	if (source != nullptr) {
 		source->Transit(vk_command, vk::ImageLayout::eTransferSrcOptimal,
 		                vk::AccessFlagBits2::eTransferRead);
+		// The frame the launcher's quick menu opens over, if it asked for one
+		if (!source->blank) {
+			m_launcher_overlay.Capture(vk_command, source->image.image,
+			                           {source->image.extent.width, source->image.extent.height});
+		}
 	}
+	// The launcher's quick menu, drawn over everything
+	const auto launcher_view   = m_launcher_overlay.Acquire(vk_command);
+	const bool draw_launcher   = launcher_view != nullptr;
+	const bool draw_attachment = draw_overlay || draw_system_overlay || draw_launcher;
 	if (draw_overlay) {
 		overlay.frame->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
 		                       vk::AccessFlagBits2::eShaderRead);
@@ -895,6 +920,19 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		}
 		if (draw_system_overlay) {
 			m_system_overlay->Record(vk_command, m_image_views[m_image_index]);
+		}
+		if (draw_launcher) {
+			if (draw_overlay || draw_system_overlay) {
+				to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+				to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
+				vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0,
+				                           nullptr, 1, &to_present);
+			}
+			// Premultiplied BGRA8, filling the window
+			DrawTexture(vk_command, launcher_view, 1u | (m_hdr_active ? 2u : 0u),
+			            {{0, 0}, m_extent});
 		}
 		to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
 		to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
@@ -1025,7 +1063,7 @@ bool Presenter::IsHdrSupported() const noexcept {
 
 bool Presenter::NeedsSystemOverlayRefresh() const noexcept {
 	const auto visual = GetSystemOverlayVisualState();
-	return visual.active ||
+	return visual.active || LauncherOverlay::WantsPresents() ||
 	       visual.revision != m_impl->presented_overlay_revision.load(std::memory_order_acquire);
 }
 
@@ -1084,12 +1122,14 @@ void Presenter::Impl::Present() {
 		}
 		// present_mutex owns the prepared frames and this scheduler. Only queue submission
 		// is shared with rendering, and it has its own queue_mutex.
-		auto&      command = present_scheduler.BeginCommand();
+		auto& command = present_scheduler.BeginCommand();
+		swapchain.LauncherRenderer().BeginPresent(present_scheduler, swapchain.Extent());
 		const bool draw_system_overlay = (overlay_visual.active || PerformanceOverlayEnabled()) &&
 		                                 swapchain.PrepareSystemOverlay();
 		swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 		                                draw_system_overlay);
 		const auto tick = swapchain.Submit(present_scheduler);
+		swapchain.LauncherRenderer().EndPresent(tick);
 		for (const auto& layer: layers) {
 			if (layer.frame != nullptr) {
 				layer.frame->present_tick = tick;
