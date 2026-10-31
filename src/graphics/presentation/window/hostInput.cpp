@@ -748,6 +748,21 @@ void HostInputInit(SDL_Window* window) {
 	}
 }
 
+void HostInputCursorConfigChanged() {
+	if (g_mouse_window == nullptr) {
+		return;
+	}
+	if (Config::HideCursorEnabled()) {
+		// Hidden once the mouse stays still, as from the start
+		g_cursor_hide_at = SDL_GetTicks() + CURSOR_IDLE_HIDE_MS;
+		return;
+	}
+	g_cursor_hide_at = 0;
+	if (!g_mouse.enabled && !TouchPadModeActive() && !SDL_ShowCursor()) {
+		LOGF("Failed to show the mouse cursor: %s\n", SDL_GetError());
+	}
+}
+
 void HostInputShutdown() {
 	g_pad_trigger_pressed.clear();
 	HostInputSetTouchPadMode(false);

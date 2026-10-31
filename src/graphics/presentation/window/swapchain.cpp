@@ -271,6 +271,10 @@ public:
 	void                 Create();
 	void                 Recreate(bool surface_lost = false);
 	[[nodiscard]] bool   NeedsResize() const;
+	// The present mode setting changed since this swapchain was made
+	[[nodiscard]] bool PresentModeChanged() const noexcept {
+		return m_present_mode != Config::GetPresentMode();
+	}
 	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
 	[[nodiscard]] bool   PrepareSystemOverlay();
 	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
@@ -309,6 +313,8 @@ private:
 	bool             m_hdr_requested = false;
 	bool             m_hdr_active    = false;
 	vk::Extent2D     m_extent {};
+	// The setting this swapchain was made with
+	Config::PresentMode m_present_mode = Config::PresentMode::Fifo;
 	// Drawable pixel size observed when this swapchain was created.
 	vk::Extent2D                   m_window_extent {};
 	std::vector<vk::Image>         m_images;
@@ -470,7 +476,8 @@ void Swapchain::Create() {
 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
 	create_info.preTransform     = transform;
 	create_info.compositeAlpha   = composite;
-	switch (Config::GetPresentMode()) {
+	m_present_mode = Config::GetPresentMode();
+	switch (m_present_mode) {
 		case Config::PresentMode::Mailbox:
 			create_info.presentMode = vk::PresentModeKHR::eMailbox;
 			break;
@@ -1110,8 +1117,9 @@ void Presenter::Impl::Present() {
 	const auto* main_frame = layers[0].frame;
 	const bool hdr_changed = main_frame != nullptr && !main_frame->blank &&
 	                         swapchain.SetHdr(main_frame->hdr);
-	// Some window systems keep presenting an old swapchain after a resize.
-	if (hdr_changed || swapchain.NeedsResize()) {
+	// Some window systems keep presenting an old swapchain after a resize. A new present mode
+	// from the launcher's settings needs a new swapchain too.
+	if (hdr_changed || swapchain.NeedsResize() || swapchain.PresentModeChanged()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {

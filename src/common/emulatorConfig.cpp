@@ -4,11 +4,41 @@
 #include "common/debugCounters.h"
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
 
 namespace Config {
 
 static std::unique_ptr<ConfigOptions> g_config;
+
+// The options that can change while a game runs (ChangeLive), read from any thread.
+struct LiveOptions {
+	// The width in the high half, so the two never tear
+	std::atomic<uint64_t> screen_size {};
+	std::atomic<uint32_t> controller_speaker_volume {};
+	std::atomic<uint32_t> controller_vibration_intensity {};
+	std::atomic<PresentMode> present_mode {};
+	std::atomic<bool> fullscreen_enabled {};
+	std::atomic<bool> hide_cursor_enabled {};
+	std::atomic<bool> stretch_enabled {};
+	std::atomic<uint32_t> vblank_frequency {};
+	std::atomic<bool> network_connected {};
+	std::atomic<bool> sync_raw_image_buffers {};
+	std::atomic<bool> tessellation_enabled {};
+};
+
+static LiveOptions g_live;
+
+// Held while ChangeLive changes them, and while Load and Shutdown make or drop g_config
+static std::mutex g_live_mutex;
+static bool       g_loaded = false;
+// Changes made before Load, which it applies over its options
+static std::vector<std::function<void(ConfigOptions&)>> g_pending_live;
+
+static void StoreLive(const ConfigOptions& cfg);
 
 void Initialize() {
 	EXIT_IF(g_config != nullptr);
@@ -18,6 +48,8 @@ void Initialize() {
 
 void Shutdown() {
 	Common::DebugCounters::SetEnabled(false);
+	std::lock_guard lock(g_live_mutex);
+	g_loaded = false;
 	g_config.reset();
 }
 
@@ -28,16 +60,68 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(cfg.controller_speaker_volume > 100 || cfg.controller_vibration_intensity > 100);
 	EXIT_IF(cfg.keyboard_player > static_cast<uint32_t>(MAX_PLAYERS));
 
+	std::lock_guard lock(g_live_mutex);
 	*g_config = cfg;
+	auto live = cfg;
+	for (const auto& change: std::exchange(g_pending_live, {})) {
+		change(live);
+	}
+	StoreLive(live);
+	g_loaded = true;
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
+// The options as they are now
+static ConfigOptions Current() {
+	ConfigOptions cfg = *g_config;
+	const uint64_t size = g_live.screen_size.load(std::memory_order_relaxed);
+	cfg.screen_width  = static_cast<uint32_t>(size >> 32u);
+	cfg.screen_height = static_cast<uint32_t>(size);
+	cfg.controller_speaker_volume = g_live.controller_speaker_volume.load(std::memory_order_relaxed);
+	cfg.controller_vibration_intensity = g_live.controller_vibration_intensity.load(std::memory_order_relaxed);
+	cfg.present_mode = g_live.present_mode.load(std::memory_order_relaxed);
+	cfg.fullscreen_enabled = g_live.fullscreen_enabled.load(std::memory_order_relaxed);
+	cfg.hide_cursor_enabled = g_live.hide_cursor_enabled.load(std::memory_order_relaxed);
+	cfg.stretch_enabled = g_live.stretch_enabled.load(std::memory_order_relaxed);
+	cfg.vblank_frequency = g_live.vblank_frequency.load(std::memory_order_relaxed);
+	cfg.network_connected = g_live.network_connected.load(std::memory_order_relaxed);
+	cfg.sync_raw_image_buffers = g_live.sync_raw_image_buffers.load(std::memory_order_relaxed);
+	cfg.tessellation_enabled = g_live.tessellation_enabled.load(std::memory_order_relaxed);
+	return cfg;
+}
+
+void ChangeLive(std::function<void(ConfigOptions&)> change) {
+	std::lock_guard lock(g_live_mutex);
+	if (!g_loaded) {
+		g_pending_live.push_back(std::move(change));
+		return;
+	}
+	auto cfg = Current();
+	change(cfg);
+	StoreLive(cfg);
+}
+
+static void StoreLive(const ConfigOptions& cfg) {
+	g_live.screen_size.store((static_cast<uint64_t>(cfg.screen_width) << 32u) | cfg.screen_height,
+	                         std::memory_order_relaxed);
+	g_live.controller_speaker_volume.store(cfg.controller_speaker_volume, std::memory_order_relaxed);
+	g_live.controller_vibration_intensity.store(cfg.controller_vibration_intensity, std::memory_order_relaxed);
+	g_live.present_mode.store(cfg.present_mode, std::memory_order_relaxed);
+	g_live.fullscreen_enabled.store(cfg.fullscreen_enabled, std::memory_order_relaxed);
+	g_live.hide_cursor_enabled.store(cfg.hide_cursor_enabled, std::memory_order_relaxed);
+	g_live.stretch_enabled.store(cfg.stretch_enabled, std::memory_order_relaxed);
+	g_live.vblank_frequency.store(cfg.vblank_frequency, std::memory_order_relaxed);
+	g_live.network_connected.store(cfg.network_connected, std::memory_order_relaxed);
+	g_live.sync_raw_image_buffers.store(cfg.sync_raw_image_buffers, std::memory_order_relaxed);
+	g_live.tessellation_enabled.store(cfg.tessellation_enabled, std::memory_order_relaxed);
+}
+
 uint32_t GetScreenWidth() {
-	return g_config->screen_width;
+	return static_cast<uint32_t>(g_live.screen_size.load(std::memory_order_relaxed) >> 32u);
 }
 
 uint32_t GetScreenHeight() {
-	return g_config->screen_height;
+	return static_cast<uint32_t>(g_live.screen_size.load(std::memory_order_relaxed));
 }
 
 const std::string& GetUserName() {
@@ -57,11 +141,11 @@ const std::optional<ControllerColor>& GetControllerColor() {
 }
 
 uint32_t GetControllerSpeakerVolume() {
-	return g_config->controller_speaker_volume;
+	return g_live.controller_speaker_volume.load(std::memory_order_relaxed);
 }
 
 uint32_t GetControllerVibrationIntensity() {
-	return g_config->controller_vibration_intensity;
+	return g_live.controller_vibration_intensity.load(std::memory_order_relaxed);
 }
 
 uint32_t GetKeyboardPlayer() {
@@ -86,7 +170,7 @@ bool IsGuestUserId(int32_t user_id) {
 }
 
 PresentMode GetPresentMode() {
-	return g_config->present_mode;
+	return g_live.present_mode.load(std::memory_order_relaxed);
 }
 
 int32_t GetGpuIndex() {
@@ -94,7 +178,7 @@ int32_t GetGpuIndex() {
 }
 
 bool FullscreenEnabled() {
-	return g_config->fullscreen_enabled;
+	return g_live.fullscreen_enabled.load(std::memory_order_relaxed);
 }
 
 bool HdrEnabled() {
@@ -102,11 +186,11 @@ bool HdrEnabled() {
 }
 
 bool HideCursorEnabled() {
-	return g_config->hide_cursor_enabled;
+	return g_live.hide_cursor_enabled.load(std::memory_order_relaxed);
 }
 
 bool StretchEnabled() {
-	return g_config->stretch_enabled;
+	return g_live.stretch_enabled.load(std::memory_order_relaxed);
 }
 
 bool VrEnabled() {
@@ -122,7 +206,7 @@ bool AmdCpuEnabled() {
 }
 
 uint32_t GetVblankFrequency() {
-	return std::clamp(g_config->vblank_frequency, 30u, 360u);
+	return std::clamp(g_live.vblank_frequency.load(std::memory_order_relaxed), 30u, 360u);
 }
 
 uint32_t GetConsoleLanguage() {
@@ -134,7 +218,7 @@ bool VulkanValidationEnabled() {
 }
 
 bool IsNetworkConnected() {
-	return g_config->network_connected;
+	return g_live.network_connected.load(std::memory_order_relaxed);
 }
 
 bool PsnEmulationEnabled() {
@@ -206,11 +290,11 @@ bool ReadbackTiledImagesEnabled() {
 }
 
 bool SyncRawImageBuffersEnabled() {
-	return g_config->sync_raw_image_buffers;
+	return g_live.sync_raw_image_buffers.load(std::memory_order_relaxed);
 }
 
 bool TessellationEnabled() {
-	return g_config->tessellation_enabled;
+	return g_live.tessellation_enabled.load(std::memory_order_relaxed);
 }
 
 bool OcclusionQueriesEnabled() {

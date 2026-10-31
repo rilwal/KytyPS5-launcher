@@ -40,8 +40,12 @@ struct Entry {
 	std::string_view label;
 	std::string_view section;
 	Kind             kind;
+	std::string_view help;
 	bool             live = false;
 };
+
+// What a row that can't change while a game runs says
+constexpr std::string_view RESTART_NOTE = "Takes effect when the game next starts.";
 
 constexpr std::array<std::string_view, 3> PRESENT_MODES = {"Fifo", "Mailbox", "Immediate"};
 
@@ -57,57 +61,86 @@ constexpr std::array<std::string_view, Config::MAX_CONSOLE_LANGUAGE + 1> LANGUAG
     "Greek", "Romanian", "Thai", "Vietnamese", "Indonesian"};
 
 // The options worth a row in the launcher; debugging aids (dumps, validation, logs) are left out.
+// Those marked live change while a game runs (launcherMode.cpp); the rest wait for the next boot.
 const std::array ENTRIES = {
     // Display
-    Entry {"resolution", "Window size", "Display", Resolution {}},
-    Entry {"fullscreen", "Fullscreen", "Display", Toggle {&ConfigOptions::fullscreen_enabled}},
-    Entry {"hdr", "HDR", "Display", Toggle {&ConfigOptions::hdr_enabled}},
-    Entry {"stretch", "Stretch to window", "Display", Toggle {&ConfigOptions::stretch_enabled}},
-    Entry {"present-mode", "Present mode", "Display", PresentModeChoice {}},
+    Entry {"resolution", "Window size", "Display", Resolution {},
+           "The game window's size when it isn't fullscreen.", true},
+    Entry {"fullscreen", "Fullscreen", "Display", Toggle {&ConfigOptions::fullscreen_enabled},
+           "Borderless fullscreen on the window's display.", true},
+    Entry {"hdr", "HDR", "Display", Toggle {&ConfigOptions::hdr_enabled},
+           "Output HDR10 when the game and the display support it."},
+    Entry {"stretch", "Stretch to window", "Display", Toggle {&ConfigOptions::stretch_enabled},
+           "Fill the window instead of keeping the game's aspect ratio.", true},
+    Entry {"present-mode", "Present mode", "Display", PresentModeChoice {},
+           "Fifo waits for the display, Mailbox replaces waiting frames, Immediate can tear.",
+           true},
     Entry {"vblank-frequency", "Vblank frequency", "Display",
-           Number<uint32_t> {&ConfigOptions::vblank_frequency, 30, 240}},
+           Number<uint32_t> {&ConfigOptions::vblank_frequency, 30, 240},
+           "The emulated display's refresh rate, in Hz.", true},
     Entry {"hide-cursor", "Hide the cursor", "Display",
-           Toggle {&ConfigOptions::hide_cursor_enabled}},
+           Toggle {&ConfigOptions::hide_cursor_enabled},
+           "Hide the mouse cursor after 2 seconds without moving.", true},
     Entry {"splash", "Splash screen", "Display",
-           Toggle {&ConfigOptions::splash_enabled, false}},
+           Toggle {&ConfigOptions::splash_enabled, false},
+           "Show the splash screen while the game starts."},
     Entry {"perf-overlay", "Performance overlay", "Display",
-           Toggle {&ConfigOptions::perf_overlay_enabled}, true},
+           Toggle {&ConfigOptions::perf_overlay_enabled},
+           "Show frame rate and timings over the game.", true},
     // Graphics
     Entry {"gpu", "GPU (-1 picks one)", "Graphics",
-           Number<int32_t> {&ConfigOptions::gpu_index, -1, 7}},
+           Number<int32_t> {&ConfigOptions::gpu_index, -1, 7},
+           "The Vulkan device to use, counted from 0."},
     Entry {"shader-cache", "Keep compiled shaders", "Graphics",
-           Toggle {&ConfigOptions::shader_cache_enabled}},
+           Toggle {&ConfigOptions::shader_cache_enabled},
+           "Keep compiled shaders and pipelines between boots."},
     Entry {"tessellation", "Tessellation", "Graphics",
-           Toggle {&ConfigOptions::tessellation_enabled}},
+           Toggle {&ConfigOptions::tessellation_enabled},
+           "Draw tessellation patches, which are skipped when off.", true},
     Entry {"occlusion-queries", "Occlusion queries", "Graphics",
-           Toggle {&ConfigOptions::occlusion_queries_enabled}},
+           Toggle {&ConfigOptions::occlusion_queries_enabled},
+           "Count occlusion query samples on the GPU."},
     Entry {"readback-linear-images", "Read back linear images", "Graphics",
-           Toggle {&ConfigOptions::readback_linear_images}},
+           Toggle {&ConfigOptions::readback_linear_images},
+           "Read back writable linear images on submit."},
     Entry {"readback-tiled-images", "Read back tiled images", "Graphics",
-           Toggle {&ConfigOptions::readback_tiled_images}},
+           Toggle {&ConfigOptions::readback_tiled_images},
+           "Read back small writable tiled images on submit."},
     Entry {"sync-raw-image-buffers", "Synchronize raw image reads", "Graphics",
-           Toggle {&ConfigOptions::sync_raw_image_buffers}},
+           Toggle {&ConfigOptions::sync_raw_image_buffers},
+           "Synchronize raw reads of GPU images.", true},
     Entry {"ps5-pro", "PS5 Pro mode (experimental)", "Graphics",
-           Toggle {&ConfigOptions::pro_enabled}},
+           Toggle {&ConfigOptions::pro_enabled},
+           "PS5 Pro mode for games that have one (PSSR uses linear scaling)."},
     // System
-    Entry {"console-language", "Console language", "System", LanguageChoice {}},
-    Entry {"user-name", "User name", "System", Text {&ConfigOptions::user_name}},
-    Entry {"network-connected", "Network", "System", Toggle {&ConfigOptions::network_connected}},
+    Entry {"console-language", "Console language", "System", LanguageChoice {},
+           "The console's language, which games and trophy lists use."},
+    Entry {"user-name", "User name", "System", Text {&ConfigOptions::user_name},
+           "The player's name on the emulated console."},
+    Entry {"network-connected", "Network", "System", Toggle {&ConfigOptions::network_connected},
+           "Use the host's local network.", true},
     Entry {"emulate-psn", "Simulate PSN sign-in", "System",
-           Toggle {&ConfigOptions::psn_emulation_enabled}},
+           Toggle {&ConfigOptions::psn_emulation_enabled},
+           "Simulate a PSN sign-in, which some games need."},
     Entry {"skip-notice-screen", "Skip notice screens", "System",
-           Toggle {&ConfigOptions::skip_notice_screen}},
-    Entry {"playgo-hack", "PlayGo fallback", "System", Toggle {&ConfigOptions::playgo_hack_enabled}},
-    Entry {"amd-cpu", "AMD CPU patches", "System", Toggle {&ConfigOptions::amd_cpu_enabled}},
+           Toggle {&ConfigOptions::skip_notice_screen},
+           "Skip startup logos and notices in games that support it."},
+    Entry {"playgo-hack", "PlayGo fallback", "System", Toggle {&ConfigOptions::playgo_hack_enabled},
+           "Use the supplied PlayGo stub as a fallback."},
+    Entry {"amd-cpu", "AMD CPU patches", "System", Toggle {&ConfigOptions::amd_cpu_enabled},
+           "Apply AMD CPU instruction patches."},
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
     Entry {"redzone", "Red zone protection", "System",
-           Toggle {&ConfigOptions::red_zone_protection_enabled}},
+           Toggle {&ConfigOptions::red_zone_protection_enabled},
+           "Protect the guest's SysV red zone."},
 #endif
     // Controls
     Entry {"controller-volume", "Controller speaker volume", "Controls",
-           Number<uint32_t> {&ConfigOptions::controller_speaker_volume, 0, 100}},
+           Number<uint32_t> {&ConfigOptions::controller_speaker_volume, 0, 100},
+           "The controller speaker's volume, in percent.", true},
     Entry {"controller-vibration", "Controller vibration", "Controls",
-           Number<uint32_t> {&ConfigOptions::controller_vibration_intensity, 0, 100}},
+           Number<uint32_t> {&ConfigOptions::controller_vibration_intensity, 0, 100},
+           "How strongly the controller vibrates, in percent.", true},
 };
 
 const Entry* Find(std::string_view key) {
@@ -160,6 +193,10 @@ std::vector<Row> PluginRows() {
 		row.section       = std::string(e->section);
 		row.default_value = ValueOf(*e, defaults);
 		row.live          = e->live;
+		row.help          = std::string(e->help);
+		if (!e->live) {
+			row.help += fmt::format("{}{}", row.help.empty() ? "" : " ", RESTART_NOTE);
+		}
 		row.runner        = e->key == "console-language";
 		std::visit(
 		    [&](const auto& kind) {

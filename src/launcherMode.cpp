@@ -34,11 +34,45 @@ static void SetPerformanceOverlay(bool enabled) {
 	}
 }
 
+// What the window has to do after a live setting changed (Libs::Graphics::WindowFollowConfig)
+static uint32_t WindowChanges(std::string_view key) {
+	namespace WindowConfig = Libs::Graphics::WindowConfig;
+	if (key == "resolution") {
+		return WindowConfig::Size;
+	}
+	if (key == "fullscreen") {
+		return WindowConfig::Fullscreen;
+	}
+	if (key == "hide-cursor") {
+		return WindowConfig::Cursor;
+	}
+	// The rest are read where they're used, each time: the present mode by the next present
+	return 0;
+}
+
+// The launcher sends only live settings while the game runs (Settings::IsLive). They go into
+// Config's live options, which the emulator reads as it goes; one that comes before the emulator
+// loads its options waits for that.
 static void ApplyLive(const std::string& key, const std::optional<std::string>& value) {
 	if (key == PERF_OVERLAY) {
 		SetPerformanceOverlay(value.value_or("false") == "true");
-	} else {
-		LOGF("[Launcher] '%s' can't change while a game is running\n", key.c_str());
+		return;
+	}
+	// Whether the value is valid doesn't depend on the other options
+	Config::ConfigOptions check;
+	if (const auto error = Launcher::Settings::Apply(check, key, value); !error.empty()) {
+		LOGF("[Launcher] setting: %s\n", error.c_str());
+		if (auto* session = Launcher::Session::Get(); session != nullptr) {
+			session->Notify("A setting wasn't applied", error, true);
+		}
+		return;
+	}
+	LOGF("[Launcher] setting '%s' changed while running\n", key.c_str());
+	Config::ChangeLive([key, value](Config::ConfigOptions& cfg) {
+		(void)Launcher::Settings::Apply(cfg, key, value);
+	});
+	if (const auto changes = WindowChanges(key); changes != 0) {
+		Libs::Graphics::WindowFollowConfig(changes);
 	}
 }
 
@@ -186,6 +220,8 @@ static Launcher::Handlers MakeHandlers() {
 	handlers.setting = [](const std::string& key, const std::optional<std::string>& value) {
 		if (Launcher::Settings::IsLive(key)) {
 			ApplyLive(key, value);
+		} else {
+			LOGF("[Launcher] '%s' can't change while a game is running\n", key.c_str());
 		}
 	};
 
