@@ -142,6 +142,11 @@ std::unique_ptr<WindowContext> g_window;
 std::atomic_bool g_launcher_paused = false;
 std::atomic_bool g_launcher_quit   = false;
 
+// WindowFollowConfig's event, registered once the window's events run (0 until then), and what it
+// has to follow
+std::atomic<Uint32>   g_config_event   = 0;
+std::atomic<uint32_t> g_config_changes = 0;
+
 } // namespace
 
 bool LauncherPaused() noexcept {
@@ -383,6 +388,48 @@ void WindowContext::Resize(int new_width, int new_height) {
 	graphic_ctx.screen_height = static_cast<uint32_t>(new_height);
 }
 
+void WindowContext::ApplyConfiguredSize() {
+	const auto flags = static_cast<uint32_t>(SDL_GetWindowFlags(window));
+	if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED)) != 0u) {
+		size_pending = true;
+		if ((flags & SDL_WINDOW_FULLSCREEN) == 0u && !SDL_RestoreWindow(window)) {
+			LOGF("Restore window failed: %s\n", SDL_GetError());
+		}
+		return;
+	}
+	size_pending      = false;
+	const auto width  = static_cast<int>(Config::GetScreenWidth());
+	const auto height = static_cast<int>(Config::GetScreenHeight());
+	LOGF("Window size from the settings: %dx%d\n", width, height);
+	if (!SDL_SetWindowSize(window, width, height)) {
+		LOGF("Set window size failed: %s\n", SDL_GetError());
+	}
+}
+
+void WindowContext::FollowConfig(uint32_t changes) {
+	if (window == nullptr) {
+		return;
+	}
+	if ((changes & WindowConfig::Fullscreen) != 0u) {
+		// Asked for even when the flags say it's already so: they lag behind a transition that's
+		// still going (Wayland, macOS Spaces), and SDL ignores a request for the state it's in.
+		const bool fullscreen = Config::FullscreenEnabled();
+		if (fullscreen !=
+		    ((static_cast<uint32_t>(SDL_GetWindowFlags(window)) & SDL_WINDOW_FULLSCREEN) != 0u)) {
+			LOGF("Fullscreen from the settings: %s\n", fullscreen ? "on" : "off");
+		}
+		if (!SDL_SetWindowFullscreen(window, fullscreen)) {
+			LOGF("Set fullscreen failed: %s\n", SDL_GetError());
+		}
+	}
+	if ((changes & WindowConfig::Size) != 0u) {
+		ApplyConfiguredSize();
+	}
+	if ((changes & WindowConfig::Cursor) != 0u) {
+		HostInputCursorConfigChanged();
+	}
+}
+
 void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 	const auto& window_event = event;
 	switch (window_event.type) {
@@ -424,6 +471,15 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_EVENT_WINDOW_RESTORED:
 			LOGF("Window %" PRIu32 " restored\n", window_event.windowID);
+			if (size_pending) {
+				ApplyConfiguredSize();
+			}
+			break;
+		case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+			LOGF("Window %" PRIu32 " left fullscreen\n", window_event.windowID);
+			if (size_pending) {
+				ApplyConfiguredSize();
+			}
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_ENTER:
 			LOGF("Mouse entered window %" PRIu32 "\n", window_event.windowID);
@@ -506,6 +562,11 @@ void WindowContext::ProcessEvent(double time_s) {
 				return;
 			default: break;
 		}
+	}
+	if (const Uint32 type = g_config_event.load(std::memory_order_acquire);
+	    type != 0 && event->type == type) {
+		FollowConfig(g_config_changes.exchange(0, std::memory_order_acq_rel));
+		return;
 	}
 	if (ProcessSystemOverlayInput(*event)) {
 		return;
@@ -760,6 +821,8 @@ void WindowContext::Run() {
 	// A quit the launcher sent before the window existed ends the loop at once.
 	loop.need_exit = LauncherQuitRequested();
 	loop.paused.store(false, std::memory_order_release);
+	// Settings that changed while the window was being made
+	FollowConfig(g_config_changes.exchange(0, std::memory_order_acq_rel));
 
 	constexpr uint64_t title_interval_ms = 1000;
 	auto               title_time        = SDL_GetTicks();
@@ -855,6 +918,15 @@ void WindowSetLauncherPaused(bool paused) {
 	SDL_PushEvent(&event);
 }
 
+void WindowFollowConfig(uint32_t changes) {
+	g_config_changes.fetch_or(changes, std::memory_order_acq_rel);
+	SDL_Event event {};
+	event.type = g_config_event.load(std::memory_order_acquire);
+	if (event.type != 0 && !SDL_PushEvent(&event)) {
+		LOGF("WindowFollowConfig: %s\n", SDL_GetError());
+	}
+}
+
 static void WindowCreate(WindowContext& context) {
 	EXIT_IF(context.window != nullptr);
 	EXIT_IF(context.graphic_ctx.screen_width == 0);
@@ -871,6 +943,10 @@ static void WindowCreate(WindowContext& context) {
 #endif
 	if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
 		EXIT("%s\n", SDL_GetError());
+	}
+	// Run() also follows whatever changed before this
+	if (const Uint32 type = SDL_RegisterEvents(1); type != 0) {
+		g_config_event.store(type, std::memory_order_release);
 	}
 
 	LOGF("WindowCreate(): width = %d, height = %d\n", width, height);

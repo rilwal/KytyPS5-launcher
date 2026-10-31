@@ -264,7 +264,7 @@ private:
 			s.key           = row.key.c_str();
 			s.section       = row.section.c_str();
 			s.label         = row.label.c_str();
-			s.help          = "";
+			s.help          = row.help.c_str();
 			s.value         = row.default_value.c_str();
 			s.default_value = row.default_value.c_str();
 			s.group         = GROUP;

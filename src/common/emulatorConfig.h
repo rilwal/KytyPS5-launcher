@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -107,6 +108,13 @@ struct ConfigOptions {
 };
 
 void Load(const ConfigOptions& cfg);
+
+// Changes the options that can change while a game runs: the window size, fullscreen, stretch,
+// the cursor, the present mode, the vblank frequency, tessellation, raw image buffer syncs, the
+// network and the controller's volume and vibration. `change` gets the options as they are now;
+// what it does to the others is dropped. Before Load, the change waits for it, and applies over
+// the options it's given. Safe to call from any thread, as are those options' getters.
+void ChangeLive(std::function<void(ConfigOptions&)> change);
 
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();

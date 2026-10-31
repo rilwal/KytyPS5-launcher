@@ -21,6 +21,8 @@ struct HostInputTouchPadVisualState {
 
 void               HostInputInit(SDL_Window* window);
 void               HostInputShutdown();
+// Main thread: shows the cursor, or hides it once idle, after Config::HideCursorEnabled changed
+void               HostInputCursorConfigChanged();
 void               HostInputKey(int key_code, bool down);
 void               HostInputMouseButton(uint8_t mouse_button, bool down);
 void               HostInputMouseTouchPad(bool down, float x, float y);
