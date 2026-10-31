@@ -65,6 +65,7 @@ pkgs.mkShell {
     pkg-config
     git
     glslang # provides glslangValidator for the bundled shaders
+    python3 # SPIRV-Tools generates its grammar tables at configure time
   ];
 
   buildInputs = buildDeps;

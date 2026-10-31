@@ -24,6 +24,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1136,6 +1137,19 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
 		}
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		// The launcher's overlay is shared as linear dma-bufs (graphics/presentation/launcherOverlay.cpp)
+		if (const std::array dma_buf_extensions {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+		                                         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+		                                         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME};
+		    std::ranges::all_of(dma_buf_extensions, [&](const char* extension) {
+			    return HasExtension(available_extensions, extension);
+		    })) {
+			device_extensions.insert(device_extensions.end(), dma_buf_extensions.begin(),
+			                         dma_buf_extensions.end());
+			graphic_ctx.dma_buf_sharing_enabled = true;
+		}
+#endif
 		Vr::OpenXrAppendExtensions(device_extensions, available_extensions, true);
 	}
 

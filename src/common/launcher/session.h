@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Launcher mode: when the game launcher (github.com/rilwal/game-launcher) starts Kyty, it sets
@@ -38,6 +39,10 @@ struct Handlers {
 	std::function<void(const std::string&, const std::optional<std::string>&)> invoke;
 	// A live setting changed while the game runs: Kyty's key, value as text (null for the default)
 	std::function<void(const std::string&, const std::optional<std::string>&)> setting;
+	// composited_overlay: the shell's surfaces (overlay_surface; no buffers takes them away), and
+	// whether to draw them (overlay_visible)
+	std::function<void(const HostMessage&)> overlay_surface;
+	std::function<void(bool)>               overlay_visible;
 };
 
 class Session final {
@@ -71,6 +76,9 @@ public:
 	void Achievements(const std::vector<Achievement>& list);
 	void Unlocked(std::string_view id, std::optional<int64_t> at);
 	void OverlayItems(const std::vector<Setting>& items);
+	// composited_overlay: the game window's size. Goes out with ready, and on every change after.
+	void View(uint32_t width, uint32_t height);
+	void CaptureSurface(uint32_t id, uint32_t width, uint32_t height);
 
 	[[nodiscard]] bool HasFailed() const { return m_failed.load(); }
 
@@ -124,6 +132,10 @@ private:
 	};
 	std::mutex                           m_activity_mutex;
 	std::map<std::string, ActivityState> m_activities;
+
+	std::mutex                                   m_view_mutex;
+	std::optional<std::pair<uint32_t, uint32_t>> m_view;
+	bool                                         m_ready_sent = false; // View goes out after it
 };
 
 } // namespace Common::Launcher

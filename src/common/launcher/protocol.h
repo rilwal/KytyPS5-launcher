@@ -67,6 +67,9 @@ using ConfigureValues = std::map<std::string, std::optional<std::string>>;
 [[nodiscard]] std::string AchievementListJson(const std::vector<Achievement>& list);
 [[nodiscard]] Message UnlockedMsg(std::string_view id, std::optional<int64_t> at);
 [[nodiscard]] Message OverlayItemsMsg(const std::vector<Setting>& items);
+// composited_overlay: the game window's size in pixels, and the frame the game paused on
+[[nodiscard]] Message ViewMsg(uint32_t width, uint32_t height);
+[[nodiscard]] Message CaptureSurfaceMsg(uint32_t id, uint32_t width, uint32_t height);
 
 // Launcher to plugin
 struct HostMessage {
@@ -78,6 +81,12 @@ struct HostMessage {
 	std::optional<std::string> value;     // invoke, setting; as text
 	std::string                server;    // The welcome's server name
 	std::string                encoding;  // The welcome's encoding
+	std::vector<uint32_t>      buffers;         // overlay_surface: the surfaces' ids
+	uint32_t                   header  = 0;     // overlay_surface: the header's id, or 0
+	std::string                service;         // overlay_surface: where to get them
+	uint32_t                   width   = 0;     // overlay_surface
+	uint32_t                   height  = 0;     // overlay_surface
+	bool                       visible = false; // overlay_visible
 	bool                       ok = true; // False if the frame wasn't a JSON object
 };
 

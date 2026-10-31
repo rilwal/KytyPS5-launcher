@@ -1,0 +1,12 @@
+{
+  "type": "overlay_surface",
+  "buffers": [
+    11,
+    12,
+    13
+  ],
+  "header": 10,
+  "service": "launcher-shell.overlay.4242.9f3c1a7e5b2d8c60",
+  "width": 1920,
+  "height": 1080
+}

@@ -390,6 +390,14 @@ void Session::Dispatch(const std::string& frame) {
 		if (m_handlers.overlay) {
 			m_handlers.overlay(msg.type == "overlay_opened");
 		}
+	} else if (msg.type == "overlay_surface") {
+		if (m_handlers.overlay_surface) {
+			m_handlers.overlay_surface(msg);
+		}
+	} else if (msg.type == "overlay_visible") {
+		if (m_handlers.overlay_visible) {
+			m_handlers.overlay_visible(msg.visible);
+		}
 	} else if (msg.type == "invoke") {
 		if (m_handlers.invoke) {
 			m_handlers.invoke(msg.key, msg.value);
@@ -490,7 +498,12 @@ void Session::Ready(std::optional<uint32_t> pid, std::optional<uint64_t> window)
 	LOGF("[Launcher] sending ready (pid=%s, window=%s)\n",
 	     pid ? std::to_string(*pid).c_str() : "null",
 	     window ? std::to_string(*window).c_str() : "null");
+	std::lock_guard lock(m_view_mutex);
 	Send(Launcher::Ready(pid, window));
+	m_ready_sent = true;
+	if (m_view) {
+		Send(ViewMsg(m_view->first, m_view->second));
+	}
 }
 
 void Session::Paused(bool paused) {
@@ -550,6 +563,23 @@ void Session::Unlocked(std::string_view id, std::optional<int64_t> at) {
 
 void Session::OverlayItems(const std::vector<Setting>& items) {
 	Send(OverlayItemsMsg(items));
+}
+
+void Session::View(uint32_t width, uint32_t height) {
+	std::lock_guard lock(m_view_mutex);
+	if (m_view == std::pair(width, height)) {
+		return;
+	}
+	m_view = std::pair(width, height);
+	if (m_ready_sent) {
+		LOGF("[Launcher] sending view %ux%u\n", width, height);
+		Send(ViewMsg(width, height));
+	}
+}
+
+void Session::CaptureSurface(uint32_t id, uint32_t width, uint32_t height) {
+	LOGF("[Launcher] sending capture_surface %u (%ux%u)\n", id, width, height);
+	Send(CaptureSurfaceMsg(id, width, height));
 }
 
 } // namespace Common::Launcher
