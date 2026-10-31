@@ -411,13 +411,15 @@ void WindowContext::FollowConfig(uint32_t changes) {
 		return;
 	}
 	if ((changes & WindowConfig::Fullscreen) != 0u) {
-		const bool fullscreen =
-		    (static_cast<uint32_t>(SDL_GetWindowFlags(window)) & SDL_WINDOW_FULLSCREEN) != 0u;
-		if (fullscreen != Config::FullscreenEnabled()) {
-			LOGF("Fullscreen from the settings: %s\n", fullscreen ? "off" : "on");
-			if (!SDL_SetWindowFullscreen(window, !fullscreen)) {
-				LOGF("Set fullscreen failed: %s\n", SDL_GetError());
-			}
+		// Asked for even when the flags say it's already so: they lag behind a transition that's
+		// still going (Wayland, macOS Spaces), and SDL ignores a request for the state it's in.
+		const bool fullscreen = Config::FullscreenEnabled();
+		if (fullscreen !=
+		    ((static_cast<uint32_t>(SDL_GetWindowFlags(window)) & SDL_WINDOW_FULLSCREEN) != 0u)) {
+			LOGF("Fullscreen from the settings: %s\n", fullscreen ? "on" : "off");
+		}
+		if (!SDL_SetWindowFullscreen(window, fullscreen)) {
+			LOGF("Set fullscreen failed: %s\n", SDL_GetError());
 		}
 	}
 	if ((changes & WindowConfig::Size) != 0u) {

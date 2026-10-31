@@ -65,7 +65,7 @@ constexpr std::array<std::string_view, Config::MAX_CONSOLE_LANGUAGE + 1> LANGUAG
 const std::array ENTRIES = {
     // Display
     Entry {"resolution", "Window size", "Display", Resolution {},
-           "The game window's size when it isn't fullscreen.", true},
+           "The game window's size when it isn't fullscreen. The output resolution games see is set at boot.", true},
     Entry {"fullscreen", "Fullscreen", "Display", Toggle {&ConfigOptions::fullscreen_enabled},
            "Borderless fullscreen on the window's display.", true},
     Entry {"hdr", "HDR", "Display", Toggle {&ConfigOptions::hdr_enabled},
@@ -77,7 +77,7 @@ const std::array ENTRIES = {
            true},
     Entry {"vblank-frequency", "Vblank frequency", "Display",
            Number<uint32_t> {&ConfigOptions::vblank_frequency, 30, 240},
-           "The emulated display's refresh rate, in Hz.", true},
+           "The emulated display's refresh rate, in Hz. A game picks its own 120 Hz mode at boot.", true},
     Entry {"hide-cursor", "Hide the cursor", "Display",
            Toggle {&ConfigOptions::hide_cursor_enabled},
            "Hide the mouse cursor after 2 seconds without moving.", true},

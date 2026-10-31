@@ -23,7 +23,7 @@ inline constexpr uint32_t Fullscreen = 1u << 1u; // Config::FullscreenEnabled
 inline constexpr uint32_t Cursor     = 1u << 2u; // Config::HideCursorEnabled
 } // namespace WindowConfig
 
-// After Config::UpdateLive changed those options: the window follows them on the main thread.
+// After Config::ChangeLive changed those options: the window follows them on the main thread.
 // Before the window exists, nothing needs doing, since it's made with the options as they are.
 // Safe to call from any thread.
 void WindowFollowConfig(uint32_t changes);

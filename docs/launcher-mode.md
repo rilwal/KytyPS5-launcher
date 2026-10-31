@@ -101,9 +101,10 @@ Settings marked live change while the game runs, from the launcher's settings or
 the launcher sends them with `setting` and Kyty applies them at once (`src/launcherMode.cpp`):
 
 - The window size, fullscreen and the cursor: the window follows on the main thread. A size chosen
-  while the window is fullscreen or maximized applies once it's back to normal.
+  while the window is fullscreen applies when it leaves fullscreen; a maximized window is restored
+  to the new size. The output resolution a game is told about stays the boot one.
 - The present mode: the next present makes a new swapchain.
-- Stretch, the vblank frequency, tessellation, raw image buffer syncs, the network, the
+- Stretch, the vblank frequency (though a game picks its own 120 Hz mode at boot), tessellation, raw image buffer syncs, the network, the
   controller's volume and vibration, and the performance overlay: Kyty reads them as it goes.
 
 The rest (HDR, the GPU, PS5 Pro mode, the shader cache, occlusion queries, image readbacks, PSN,
