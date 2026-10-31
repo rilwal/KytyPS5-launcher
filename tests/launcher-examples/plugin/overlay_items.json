@@ -23,7 +23,8 @@
       },
       "default": {
         "Text": "1"
-      }
+      },
+      "locked": null
     }
   ]
 }
