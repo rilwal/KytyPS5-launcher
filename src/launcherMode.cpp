@@ -172,8 +172,9 @@ static Launcher::Handlers MakeHandlers() {
 		} else {
 			Libs::Graphics::LauncherOverlay::CancelCapture();
 		}
-		Libs::Graphics::WindowSetLauncherPaused(open);
+		// The pad is the menu's before the game pauses, and the game's again before it resumes
 		Libs::Controller::HoldForLauncher(open);
+		Libs::Graphics::WindowSetLauncherPaused(open);
 		if (auto* session = Launcher::Session::Get(); session != nullptr) {
 			session->Paused(open);
 		}

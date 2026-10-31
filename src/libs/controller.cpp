@@ -189,6 +189,13 @@ private:
 	[[nodiscard]] ControllerState Visible() const {
 		auto state = m_state;
 		state.buttons &= ~m_masked;
+		// A hidden trigger reads as released, its analog value too
+		if ((m_masked & PAD_BUTTON_L2) != 0) {
+			state.axes[static_cast<int>(Axis::TriggerLeft)] = 0;
+		}
+		if ((m_masked & PAD_BUTTON_R2) != 0) {
+			state.axes[static_cast<int>(Axis::TriggerRight)] = 0;
+		}
 		return state;
 	}
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
@@ -539,6 +546,9 @@ void GameController::AddState() {
 	if (m_launcher_hold) {
 		return;
 	}
+	// A hidden button shows again once it's been released, whichever input path released it
+	// (L2 and R2 come as trigger axes, the touch pad button as a touch)
+	m_masked &= m_state.buttons;
 	const auto state = Visible();
 	if (m_states_num != 0) {
 		const auto newest = (m_first_state + m_states_num - 1) % STATES_MAX;
@@ -570,9 +580,6 @@ void GameController::Button(int id, uint32_t button, bool down) {
 		m_state.time = LibKernel::KernelGetProcessTime();
 
 		m_state.buttons = down ? m_state.buttons | button : m_state.buttons & ~button;
-		if (!down) {
-			m_masked &= ~button;
-		}
 
 		AddState();
 	}
