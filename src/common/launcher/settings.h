@@ -28,6 +28,8 @@ struct Row {
 	std::string              key;
 	std::string              label;
 	std::string              section;
+	// What it does, and for one that isn't live, that it waits for the next boot
+	std::string              help;
 	Kind                     kind = Kind::Toggle;
 	std::vector<std::string> choices; // Choice only
 	std::string              default_value;

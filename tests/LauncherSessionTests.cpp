@@ -96,9 +96,42 @@ void TestSettings() {
 	Check(Launcher::Settings::Apply(cfg, "emulate-psn", "true").empty() && cfg.psn_emulation_enabled,
 	      "PSN emulation applies");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
-	Check(Launcher::Settings::IsLive("perf-overlay") && !Launcher::Settings::IsLive("hdr") &&
-	          !Launcher::Settings::IsLive("ps5-pro"),
-	      "only the performance overlay changes in game");
+	for (const char* key: {"perf-overlay", "resolution", "fullscreen", "stretch", "present-mode",
+	                       "vblank-frequency", "hide-cursor", "tessellation", "sync-raw-image-buffers",
+	                       "network-connected", "controller-volume", "controller-vibration"}) {
+		Check(Launcher::Settings::IsLive(key), "settings the emulator reads as it goes are live");
+	}
+	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "occlusion-queries",
+	                       "readback-linear-images", "emulate-psn", "console-language", "user-name"}) {
+		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
+	}
+}
+
+// Config::ChangeLive, before and after Load
+void TestLiveOptions() {
+	Config::ChangeLive([](Config::ConfigOptions& cfg) { cfg.stretch_enabled = true; });
+	Config::Initialize();
+	Config::ConfigOptions boot;
+	boot.screen_width  = 1600;
+	boot.screen_height = 900;
+	Config::Load(boot);
+	Check(Config::StretchEnabled() && Config::GetScreenWidth() == 1600,
+	      "a change before Load applies over its options");
+
+	Config::ChangeLive([](Config::ConfigOptions& cfg) {
+		Check(cfg.stretch_enabled && cfg.screen_height == 900, "a change gets the options as they are");
+		cfg.screen_width       = 2560;
+		cfg.screen_height      = 1440;
+		cfg.present_mode       = Config::PresentMode::Immediate;
+		cfg.fullscreen_enabled = true;
+		cfg.hdr_enabled        = true;
+	});
+	Check(Config::GetScreenWidth() == 2560 && Config::GetScreenHeight() == 1440 &&
+	          Config::GetPresentMode() == Config::PresentMode::Immediate &&
+	          Config::FullscreenEnabled() && Config::StretchEnabled(),
+	      "live options change after Load");
+	Check(!Config::HdrEnabled(), "the others stay as Load set them");
+	Config::Shutdown();
 }
 
 void TestPluginRows() {
@@ -109,7 +142,10 @@ void TestPluginRows() {
 		Check(row.runner == own, "only text and the trophy language are the plugin's own settings");
 		Check(row.runner || row.kind != Launcher::Settings::Row::Kind::Text,
 		      "game settings are toggles and choices");
-		Check(row.live == (row.key == "perf-overlay"), "only the performance overlay is live");
+		Check(row.live == Launcher::Settings::IsLive(row.key), "rows say whether they're live");
+		Check(!row.help.empty(), "every row says what it does");
+		Check(row.live == (row.help.find("next starts") == std::string::npos),
+		      "rows that aren't live say they wait for the next boot");
 	}
 	const auto perf = std::ranges::find(rows, std::string("perf-overlay"), &Launcher::Settings::Row::key);
 	Check(perf != rows.end() && perf->live && !perf->runner,
@@ -192,6 +228,7 @@ void TestHostMessages() {
 int main(int argc, char* argv[]) {
 	TestTrophyList();
 	TestSettings();
+	TestLiveOptions();
 	TestPluginRows();
 	TestLibrary();
 	TestHostMessages();

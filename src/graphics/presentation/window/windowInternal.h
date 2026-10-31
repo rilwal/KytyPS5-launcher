@@ -61,6 +61,9 @@ struct WindowContext {
 	void ProcessEvent(double time_seconds);
 	void Run();
 	void SendLauncherReady();
+	// Main thread: follows changes to Config's live options (WindowFollowConfig)
+	void FollowConfig(uint32_t changes);
+	void ApplyConfiguredSize();
 
 	GraphicContext                 graphic_ctx;
 	SDL_Window*                    window        = nullptr;
@@ -69,6 +72,9 @@ struct WindowContext {
 	std::unique_ptr<RenderContext> render_context;
 	std::unique_ptr<Presenter>     presenter;
 	WindowLoopState                loop;
+	// The configured size changed while the window was fullscreen or maximized, which ignore
+	// sizes: it's set once the window is back to normal.
+	bool size_pending = false;
 
 	Common::Mutex mutex;
 };

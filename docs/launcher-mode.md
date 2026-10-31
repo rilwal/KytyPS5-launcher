@@ -95,8 +95,21 @@ They're on Kyty's page, under Emulators:
   starts as `--launcher-setting <key>=<value>`.
 - Everything else is a game setting (`game_settings`): toggles and choices, numbers being offered
   as steps. The launcher stores the player's values, globally and per game, and sends them with
-  `configure` before boot; Kyty applies them in memory over its command line. `perf-overlay` is
-  live: it can change from the launcher while a game runs.
+  `configure` before boot; Kyty applies them in memory over its command line.
+
+Settings marked live change while the game runs, from the launcher's settings or its quick menu:
+the launcher sends them with `setting` and Kyty applies them at once (`src/launcherMode.cpp`):
+
+- The window size, fullscreen and the cursor: the window follows on the main thread. A size chosen
+  while the window is fullscreen applies when it leaves fullscreen; a maximized window is restored
+  to the new size. The output resolution a game is told about stays the boot one.
+- The present mode: the next present makes a new swapchain.
+- Stretch, the vblank frequency (though a game picks its own 120 Hz mode at boot), tessellation, raw image buffer syncs, the network, the
+  controller's volume and vibration, and the performance overlay: Kyty reads them as it goes.
+
+The rest (HDR, the GPU, PS5 Pro mode, the shader cache, occlusion queries, image readbacks, PSN,
+notice screens, PlayGo, the AMD CPU patches, the console language and the user name) are read
+while the game boots. Their help text says they take effect when the game next starts.
 
 `console-language` is a choice of language names; Kyty also takes the number, as on its command line.
 
