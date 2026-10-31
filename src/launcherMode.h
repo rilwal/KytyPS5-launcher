@@ -11,10 +11,8 @@
 namespace Emulator::LauncherMode {
 
 // Connects if the launcher started Kyty, says the game is booting, and applies the settings the
-// launcher sends before boot to `config`. Without `wait_for_configure` (Kyty's own plugin started
-// the game, with its settings on the command line) it doesn't wait for them. Returns whether Kyty
-// runs in launcher mode.
-bool Start(Config::ConfigOptions& config, bool wait_for_configure = true);
+// launcher sends before boot to `config`. Returns whether Kyty runs in launcher mode.
+bool Start(Config::ConfigOptions& config);
 
 // Reports a boot that can't start, connecting first if need be. Does nothing outside
 // launcher mode.

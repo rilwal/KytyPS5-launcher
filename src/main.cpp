@@ -119,13 +119,11 @@ static void PrintUsage() {
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 	::printf("\nFor the game launcher (each on its own, as the first option):\n");
-	::printf("  --launcher-describe-settings         Print the settings it can show, as JSON.\n");
 	::printf("  --launcher-list-trophies <dir>       Print a game's trophies and unlocks, as JSON.\n");
 	::printf("  --launcher-self-test <dir>           Check the messages against its examples.\n");
 	::printf("  --launcher-plugin [--game-dir <dir>] Run as the launcher's plugin for Kyty's games.\n");
 	::printf("\nFor games the plugin starts:\n");
 	::printf("  --launcher-setting <key>=<value>     A launcher setting, by its key. Repeatable.\n");
-	::printf("  --launcher-no-configure              Don't wait for the launcher's settings.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -261,11 +259,6 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (const auto* flag = std::ranges::find(FLAGS, arg, &Flag::name); flag != std::end(FLAGS)) {
 			options.config.*flag->field = flag->value;
-			continue;
-		}
-
-		if (arg == "--launcher-no-configure") {
-			options.skip_configure = true;
 			continue;
 		}
 
@@ -477,11 +470,6 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 static std::optional<int> LauncherQuery(int argc, char* argv[]) {
 	const std::string_view first = argv[1];
 
-	if (first == Common::Launcher::Settings::DescribeFlag) {
-		::printf("%s\n", Common::Launcher::Settings::Describe().c_str());
-		return 0;
-	}
-
 	// --launcher-list-trophies <game dir> [--user-id <num>] [--console-language <0-29>]
 	// Unlocks are read from the folder Kyty runs in, as when it plays.
 	if (first == Common::Launcher::ListTrophiesFlag) {
@@ -556,7 +544,7 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
-	LauncherMode::Start(options.config, !options.skip_configure);
+	LauncherMode::Start(options.config);
 
 	Run(options);
 

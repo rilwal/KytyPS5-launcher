@@ -20,6 +20,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -42,16 +43,14 @@ namespace {
 constexpr std::string_view PLUGIN_FLAG = "--launcher-plugin";
 constexpr std::string_view GAME_DIR    = "--game-dir";
 
-// The setting holding the game folders: a path list (':' or ';' on Windows)
+// The setting holding the game folders: a folder picker keeping a list, one path per line
 constexpr char GAME_DIRS_KEY[] = "game_dirs";
 constexpr char PAGE[]          = "Kyty";
+constexpr char GROUP[]         = "Emulators";
 
 // launcherd sends a setting's stored value right after the settings are described, and nothing
 // for one never set, so the first library waits this long for the game folders.
 constexpr std::chrono::milliseconds GAME_DIRS_WAIT {1000};
-
-// A game this plugin starts: its settings are on the command line, and no configure comes
-constexpr char NO_CONFIGURE_FLAG[] = "--launcher-no-configure";
 
 fs::path SelfPath() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -71,11 +70,13 @@ fs::path SelfPath() {
 #endif
 }
 
-std::vector<fs::path> SplitFolders(std::string_view text) {
+// Folders one per line (a Path setting's list), and with `path_separators` also separated as in
+// PATH, ':' (';' on Windows), as --game-dir takes them
+std::vector<fs::path> SplitFolders(std::string_view text, bool path_separators) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	constexpr std::string_view SEPARATORS = "\n;";
+	const std::string_view SEPARATORS = path_separators ? "\n;" : "\n";
 #else
-	constexpr std::string_view SEPARATORS = "\n:";
+	const std::string_view SEPARATORS = path_separators ? "\n:" : "\n";
 #endif
 	std::vector<fs::path> out;
 	size_t                start = 0;
@@ -131,7 +132,13 @@ std::string Substitute(std::string arg, const std::string& dir, const std::strin
 
 class Plugin {
 public:
-	Plugin(std::vector<fs::path> arg_dirs, fs::path exe): m_arg_dirs(std::move(arg_dirs)), m_exe(std::move(exe)) {}
+	Plugin(std::vector<fs::path> arg_dirs, fs::path exe): m_arg_dirs(std::move(arg_dirs)), m_exe(std::move(exe)) {
+		for (const auto& row: Settings::PluginRows()) {
+			if (row.runner) {
+				m_own_keys.insert(row.key);
+			}
+		}
+	}
 
 	bool Connect() {
 		lc_callbacks cb {};
@@ -165,6 +172,11 @@ public:
 		lc_connect_info   info {};
 		info.name         = name.c_str();
 		info.capabilities = LC_CAP_LIBRARY | LC_CAP_LAUNCH | LC_CAP_ACHIEVEMENTS | LC_CAP_SETTINGS;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		// The games it starts draw the quick menu themselves (launcherOverlay.h), so launcherd
+		// keeps its own overlay out of them. Only Linux has that so far.
+		info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
+#endif
 		std::array<char, 512> error {};
 		m_session = lc_runner_connect(&info, &cb, &rc, error.data(), error.size());
 		if (m_session == nullptr) {
@@ -218,24 +230,33 @@ private:
 		}
 	}
 
+	// Its own settings (the game folders, and the rows marked runner) on Kyty's page, and the rest
+	// as game settings, which the launcher also offers per game and sends to the games it starts
 	void SendSettings() {
 		const auto rows = Settings::PluginRows();
 
-		// Kept alive until lc_settings has encoded them
+		// Kept alive until lc_settings and lc_game_settings have encoded them
 		std::vector<std::vector<lc_option>> options(rows.size());
-		std::vector<lc_setting>             items;
+		std::vector<lc_setting>             own;
+		std::vector<lc_setting>             game;
+
+		lc_path_pick pick {};
+		pick.file     = false;
+		pick.title    = "Choose a folder of PS5 games";
+		pick.start    = "~";
+		pick.multiple = true;
 
 		lc_setting dirs {};
-		dirs.key         = GAME_DIRS_KEY;
-		dirs.section     = "Games";
-		dirs.label       = "Game folders";
-		dirs.help        = "Game folders, or folders of them, one level deep. Separate several "
-		                   "with ':' (';' on Windows).";
-		dirs.kind        = LC_SETTING_TEXT;
-		dirs.placeholder = "Not set";
-		dirs.value       = "";
+		dirs.key           = GAME_DIRS_KEY;
+		dirs.section       = "Games";
+		dirs.label         = "Game folders";
+		dirs.help          = "Each a game's folder, or a folder of them, one level deep.";
+		dirs.kind          = LC_SETTING_PATH;
+		dirs.path          = &pick;
+		dirs.value         = "";
 		dirs.default_value = "";
-		items.push_back(dirs);
+		dirs.group         = GROUP;
+		own.push_back(dirs);
 
 		for (size_t i = 0; i < rows.size(); i++) {
 			const auto& row = rows[i];
@@ -246,6 +267,8 @@ private:
 			s.help          = "";
 			s.value         = row.default_value.c_str();
 			s.default_value = row.default_value.c_str();
+			s.group         = GROUP;
+			s.live          = row.live;
 			switch (row.kind) {
 				case Settings::Row::Kind::Toggle: s.kind = LC_SETTING_TOGGLE; break;
 				case Settings::Row::Kind::Text: s.kind = LC_SETTING_TEXT; break;
@@ -258,9 +281,14 @@ private:
 					s.option_count = options[i].size();
 					break;
 			}
-			items.push_back(s);
+			if (row.runner) {
+				// Apart from the game settings' System section, which the launcher lists after it
+				s.section = "Profile";
+			}
+			(row.runner ? own : game).push_back(s);
 		}
-		lc_settings(m_session, PAGE, items.data(), items.size());
+		lc_settings(m_session, PAGE, own.data(), own.size());
+		lc_game_settings(m_session, PAGE, game.data(), game.size());
 	}
 
 	void SendLibrary() {
@@ -312,10 +340,13 @@ private:
 		{
 			std::lock_guard lock(m_mutex);
 			if (k == GAME_DIRS_KEY) {
-				m_setting_dirs   = SplitFolders(value != nullptr ? value : "");
+				m_setting_dirs   = SplitFolders(value != nullptr ? value : "", false);
 				m_have_game_dirs = true;
 				rescan           = m_started; // Before that, the first library has them
 				m_cv.notify_all();
+			} else if (!m_own_keys.contains(k)) {
+				// Not one of its own settings, such as a value stored when every option was one:
+				// the game settings reach the games in configure, not on their command line
 			} else if (value != nullptr) {
 				m_values[k] = value;
 			} else {
@@ -327,7 +358,7 @@ private:
 		}
 	}
 
-	// The settings as Kyty applies them, from the stored values
+	// Its own settings as Kyty applies them, from the stored values
 	Config::ConfigOptions Options() {
 		Config::ConfigOptions cfg;
 		for (const auto& [key, value]: m_values) {
@@ -360,8 +391,8 @@ private:
 		if (std::ranges::find(args, std::string("--game")) == args.end()) {
 			args.insert(args.begin(), {"--game", dir});
 		}
-		args.emplace_back(NO_CONFIGURE_FLAG);
 		{
+			// Its own settings; the game settings come to the game from launcherd, in configure
 			std::lock_guard lock(m_mutex);
 			for (const auto& [key, value]: m_values) {
 				// Only those Kyty knows: a value it rejects would stop the game from starting
@@ -445,7 +476,8 @@ private:
 	std::deque<std::function<void()>>  m_jobs;
 	std::thread                        m_worker;
 	std::vector<fs::path>              m_setting_dirs;
-	std::map<std::string, std::string> m_values; // The settings launcherd sent, by Kyty's keys
+	std::set<std::string>              m_own_keys; // The rows marked runner, besides game_dirs
+	std::map<std::string, std::string> m_values;   // Its own settings' values, by Kyty's keys
 	Launcher::Library                  m_library;
 };
 
@@ -459,7 +491,7 @@ int Run(int argc, char* argv[]) {
 	std::vector<fs::path> dirs;
 	for (int i = 2; i < argc; i++) {
 		if (argv[i] == GAME_DIR && i + 1 < argc) {
-			auto more = SplitFolders(argv[++i]);
+			auto more = SplitFolders(argv[++i], true);
 			dirs.insert(dirs.end(), more.begin(), more.end());
 		} else {
 			::fprintf(stderr, "kyty: unknown plugin option: %s\n", argv[i]);
