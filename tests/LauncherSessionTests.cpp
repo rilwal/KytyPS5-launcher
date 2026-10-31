@@ -89,8 +89,13 @@ void TestSettings() {
 	      "a console language applies by number");
 	Check(Launcher::Settings::Apply(cfg, "console-language", "30") != "",
 	      "an unknown console language is refused");
+	Check(Launcher::Settings::Apply(cfg, "ps5-pro", "true").empty() && cfg.pro_enabled,
+	      "PS5 Pro mode applies");
+	Check(Launcher::Settings::Apply(cfg, "emulate-psn", "true").empty() && cfg.psn_emulation_enabled,
+	      "PSN emulation applies");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
-	Check(Launcher::Settings::IsLive("perf-overlay") && !Launcher::Settings::IsLive("hdr"),
+	Check(Launcher::Settings::IsLive("perf-overlay") && !Launcher::Settings::IsLive("hdr") &&
+	          !Launcher::Settings::IsLive("ps5-pro"),
 	      "only the performance overlay changes in game");
 }
 
