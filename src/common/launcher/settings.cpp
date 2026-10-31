@@ -187,22 +187,11 @@ std::string Describe() {
 }
 
 std::vector<Row> PluginRows() {
-	// The launcher showed these when it read Describe itself; the rest are a click too far.
-	constexpr std::array<std::string_view, 15> SHOWN = {
-	    "resolution",        "fullscreen",           "hdr",
-	    "present-mode",      "vblank-frequency",     "perf-overlay",
-	    "shader-cache",      "tessellation",         "occlusion-queries",
-	    "readback-linear-images", "readback-tiled-images", "console-language",
-	    "network-connected", "skip-notice-screen",   "redzone",
-	};
 	const ConfigOptions defaults;
 	std::vector<Row>    rows;
-	for (const auto key: SHOWN) {
-		const Entry* e = Find(key);
-		if (e == nullptr) {
-			continue; // Not on this platform (redzone is Windows only)
-		}
-		Row row;
+	for (const auto& entry: ENTRIES) {
+		const Entry* e = &entry;
+		Row          row;
 		row.key           = std::string(e->key);
 		row.label         = std::string(e->label);
 		row.section       = std::string(e->section);

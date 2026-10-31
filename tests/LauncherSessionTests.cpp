@@ -104,7 +104,13 @@ void TestSettings() {
 
 void TestPluginRows() {
 	const auto rows = Launcher::Settings::PluginRows();
-	Check(!rows.empty() && rows.front().key == "resolution", "the curated settings, in order");
+	const auto described = nlohmann::json::parse(Launcher::Settings::Describe());
+	Check(rows.size() == described.size() && rows.front().key == described.front()["key"].get<std::string>(),
+	      "every described setting, in order");
+	for (const char* key: {"ps5-pro", "emulate-psn"}) {
+		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
+		      "newer settings get a row too");
+	}
 	for (const auto& row: rows) {
 		Config::ConfigOptions cfg;
 		Check(Launcher::Settings::Apply(cfg, row.key, row.default_value).empty(),

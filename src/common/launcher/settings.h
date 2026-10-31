@@ -41,7 +41,7 @@ struct Row {
 	bool                     live = false;
 };
 
-// The settings worth a row in the launcher, in order: a curated few of Describe's.
+// The settings worth a row in the launcher, in order: every one Describe lists.
 [[nodiscard]] std::vector<Row> PluginRows();
 
 // What a spawned game gets on its command line for one setting: a value Apply reads.
