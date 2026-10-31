@@ -730,20 +730,29 @@ void TestLauncherHold() {
 	HoldForLauncher(true);
 	SetButton(1, PAD_BUTTON_CROSS, true);
 	SetAxis(1, Axis::TriggerRight, 255);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, true, 0.5f, 0.5f);
 	Check(drained(), "input reached the game while the launcher's menu had the pad");
 	HoldForLauncher(false);
 	Check(drained() && PadReadState(1, &data[0]) == 0 && data[0].buttons == 0 &&
 	          data[0].analog_buttons_r2 == 0,
 	      "buttons held as the menu closed reached the game");
+	SetAxis(1, Axis::TriggerRight, 128);
+	Check(PadReadState(1, &data[0]) == 0 && data[0].buttons == 0 &&
+	          data[0].analog_buttons_r2 == 0,
+	      "a trigger eased off but still held after the menu closed reached the game");
 	SetButton(1, PAD_BUTTON_CROSS, false);
 	SetAxis(1, Axis::TriggerRight, 0);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, false, 0.5f, 0.5f);
 	SetButton(1, PAD_BUTTON_CROSS, true);
 	SetAxis(1, Axis::TriggerRight, 255);
-	Check(PadReadState(1, &data[0]) == 0 && data[0].buttons == (PAD_BUTTON_CROSS | PAD_BUTTON_R2) &&
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, true, 0.5f, 0.5f);
+	Check(PadReadState(1, &data[0]) == 0 &&
+	          data[0].buttons == (PAD_BUTTON_CROSS | PAD_BUTTON_R2 | PAD_BUTTON_TOUCH_PAD) &&
 	          data[0].analog_buttons_r2 == 255,
 	      "a button released after the menu closed stayed hidden");
 	SetButton(1, PAD_BUTTON_CROSS, false);
 	SetAxis(1, Axis::TriggerRight, 0);
+	SetTouchPad(HOST_INPUT_CONTROLLER_ID, 0, false, 0.5f, 0.5f);
 }
 
 int main() {
