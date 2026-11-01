@@ -3,6 +3,7 @@
 #include "common/config.h"
 #include "common/emulatorConfig.h"
 #include "common/launcher/library.h"
+#include "common/launcher/overlayPorts.h"
 #include "common/launcher/settings.h"
 #include "common/launcher/trophyList.h"
 #include "common/stringUtils.h"
@@ -172,11 +173,12 @@ public:
 		lc_connect_info   info {};
 		info.name         = name.c_str();
 		info.capabilities = LC_CAP_LIBRARY | LC_CAP_LAUNCH | LC_CAP_ACHIEVEMENTS | LC_CAP_SETTINGS;
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 		// The games it starts draw the quick menu themselves (launcherOverlay.h), so launcherd
-		// keeps its own overlay out of them. Only Linux has that so far.
-		info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
-#endif
+		// keeps its own overlay out of them. Only where the overlay can be shared at all: elsewhere
+		// launcherd's own overlay (its Metal hook or panel) has to stay.
+		if (Launcher::OverlayPorts::Supported()) {
+			info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
+		}
 		std::array<char, 512> error {};
 		m_session = lc_runner_connect(&info, &cb, &rc, error.data(), error.size());
 		if (m_session == nullptr) {

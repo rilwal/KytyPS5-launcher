@@ -4,7 +4,7 @@
 
 #include <mutex>
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_DMA_BUF_OVERLAY
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -17,7 +17,7 @@
 
 namespace Common::Launcher::OverlayPorts {
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_DMA_BUF_OVERLAY
 
 static std::mutex g_mutex;
 

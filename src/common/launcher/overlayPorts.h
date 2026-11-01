@@ -1,6 +1,8 @@
 #ifndef KYTY_COMMON_LAUNCHER_OVERLAYPORTS_H_
 #define KYTY_COMMON_LAUNCHER_OVERLAYPORTS_H_
 
+#include "common/config.h"
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -12,6 +14,15 @@
 // capture goes back the same way. On Linux the service is an abstract SOCK_SEQPACKET socket that
 // hands out dma-bufs (and the header's memfd) as descriptors. Other platforms have none yet.
 // Any thread; calls are serialised.
+
+// Whether this build shares the overlay as dma-bufs. macOS builds as KYTY_PLATFORM_LINUX but has
+// no dma-bufs (nor SOCK_CLOEXEC), so it takes the stubs, as Windows does.
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+#define KYTY_DMA_BUF_OVERLAY 1
+#else
+#define KYTY_DMA_BUF_OVERLAY 0
+#endif
+
 namespace Common::Launcher::OverlayPorts {
 
 // A dma-buf (or the header's memfd) and its layout: one plane, `stride` bytes a row from
