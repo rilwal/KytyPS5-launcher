@@ -43,6 +43,11 @@ struct Handlers {
 	// whether to draw them (overlay_visible)
 	std::function<void(const HostMessage&)> overlay_surface;
 	std::function<void(bool)>               overlay_visible;
+	// osk: whether the shell draws the game's keyboards now (false too when the connection
+	// closes), a key on the one open, and the player done with it (accepted, or cancelled)
+	std::function<void(bool)>                                       osk_available;
+	std::function<void(uint32_t osk, uint64_t seq, const OskEdit&)> osk_edit;
+	std::function<void(uint32_t osk, bool accepted)>                osk_finish;
 };
 
 class Session final {
@@ -79,6 +84,10 @@ public:
 	// composited_overlay: the game window's size. Goes out with ready, and on every change after.
 	void View(uint32_t width, uint32_t height);
 	void CaptureSurface(uint32_t id, uint32_t width, uint32_t height);
+	// osk: a keyboard opens in the shell, its text changed, and it closed
+	void OskOpen(const ::Common::Launcher::OskOpen& open);
+	void OskText(uint32_t osk, uint64_t seq, std::string_view text, uint32_t cursor);
+	void OskClosed(uint32_t osk, std::string_view result);
 
 	[[nodiscard]] bool HasFailed() const { return m_failed.load(); }
 

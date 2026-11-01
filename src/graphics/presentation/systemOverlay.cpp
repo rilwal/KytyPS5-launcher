@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/launcher/osk.h"
 #include "common/localization.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -121,7 +122,115 @@ bool HostQueueExternalInput(uint64_t generation, ExternalInput input) {
 	           : DialogIme::HostQueueExternalInput(generation, std::move(input));
 }
 
+// By `characters`, a step at a time as the arrow keys do: a step goes over a whole character (a
+// surrogate pair too) in both IMEs. The core IME queues them for the game's next update.
+bool HostMoveCursor(uint64_t generation, int characters) {
+	bool moved = false;
+	for (int i = 0; i < std::abs(characters); i++) {
+		const int step = characters < 0 ? -1 : 1;
+		if (!IsCoreGeneration(generation)) {
+			if (!DialogIme::HostMoveCursor(generation, step)) {
+				break;
+			}
+		} else {
+			ExternalInput input;
+			input.action = step < 0 ? ExternalAction::MoveLeft : ExternalAction::MoveRight;
+			if (!CoreIme::HostQueueExternalInput(UnpackGeneration(generation), std::move(input))) {
+				break;
+			}
+		}
+		moved = true;
+	}
+	return moved;
+}
+
+size_t HostPendingInputs(uint64_t generation) {
+	return IsCoreGeneration(generation) ? CoreIme::HostPendingInputs(UnpackGeneration(generation))
+	                                    : DialogIme::HostPendingInputs(generation);
+}
+
 } // namespace Ime
+
+// The launcher's keyboard (common/launcher/osk.h): the game's keyboard as the launcher has it
+namespace LauncherKeyboard {
+
+namespace Osk = Common::Launcher::Osk;
+
+const char* Kind(Ime::Type type) {
+	switch (type) {
+		case Ime::Type::BasicLatin: return "latin";
+		case Ime::Type::Url: return "url";
+		case Ime::Type::Mail: return "email";
+		case Ime::Type::Number: return "number";
+		default: return "text";
+	}
+}
+
+const char* Enter(Ime::EnterLabel label) {
+	switch (label) {
+		case Ime::EnterLabel::Send: return "send";
+		case Ime::EnterLabel::Search: return "search";
+		case Ime::EnterLabel::Go: return "go";
+		default: return "default";
+	}
+}
+
+const char* Align(Ime::Alignment alignment) {
+	switch (alignment) {
+		case Ime::Alignment::Center: return "center";
+		case Ime::Alignment::End: return "end";
+		default: return "start";
+	}
+}
+
+Osk::Field ToField(const Ime::HostSnapshot& snapshot) {
+	Osk::Field field;
+	field.generation  = snapshot.generation;
+	field.text        = snapshot.text;
+	field.cursor      = snapshot.cursor;
+	field.kind        = Kind(snapshot.type);
+	field.enter       = Enter(snapshot.enter_label);
+	field.multiline   = (snapshot.option & Ime::OPTION_MULTILINE) != 0;
+	field.password    = (snapshot.option & Ime::OPTION_PASSWORD) != 0;
+	field.max_length  = snapshot.max_text_length;
+	field.title       = snapshot.title;
+	field.placeholder = snapshot.placeholder;
+	// Where the game puts its own, in thousandths of its 1080p (or 2160p) screen
+	const bool over_2k  = (snapshot.option & Ime::OPTION_USE_OVER_2K) != 0;
+	const auto permille = [](float value, float size) {
+		return static_cast<uint16_t>(std::clamp(value / size * 1000.0f, 0.0f, 1000.0f));
+	};
+	field.anchor = Common::Launcher::OskOpen::Anchor {
+	    permille(snapshot.posx, over_2k ? 3840.0f : 1920.0f),
+	    permille(snapshot.posy, over_2k ? 2160.0f : 1080.0f), Align(snapshot.horizontal_alignment),
+	    Align(snapshot.vertical_alignment)};
+	return field;
+}
+
+std::shared_ptr<const Osk::Ime> MakeIme() {
+	auto ime      = std::make_shared<Osk::Ime>();
+	ime->snapshot = [](Osk::Field* field) {
+		Ime::HostSnapshot snapshot;
+		if (!Ime::GetHostSnapshot(&snapshot)) {
+			return false;
+		}
+		*field = ToField(snapshot);
+		return true;
+	};
+	ime->insert    = Ime::HostInsertText;
+	ime->backspace = Ime::HostBackspace;
+	ime->move      = Ime::HostMoveCursor;
+	ime->accept    = Ime::HostAccept;
+	ime->cancel    = Ime::HostCancel;
+	ime->pending   = Ime::HostPendingInputs;
+	return ime;
+}
+
+bool Owns(uint64_t generation) {
+	return Osk::Get().Owns(generation);
+}
+
+} // namespace LauncherKeyboard
 
 enum class OverlayKind : uint8_t { None, Ime, Dialog };
 
@@ -377,17 +486,24 @@ void RetryVisibilityWakeup() {
 	}
 }
 
-void RefreshVisibility() {
+// `force`: again for the same session, whose keyboard changed hands (the launcher's or Kyty's)
+void UpdateVisibility(bool force) {
 	std::scoped_lock visibility_lock(g_visibility_mutex);
 	if (!g_input_lifecycle_active) {
 		return;
 	}
 	OverlaySnapshot snapshot;
 	const bool      visible = GetOverlaySnapshot(&snapshot);
-	if (snapshot.session == g_session) {
+	if (snapshot.session == g_session && !force) {
 		return;
 	}
 	g_session               = snapshot.session;
+	// The launcher's keyboard draws the game's when the shell can
+	if (snapshot.session.kind == OverlayKind::Ime) {
+		Common::Launcher::Osk::Get().Opened(LauncherKeyboard::ToField(snapshot.ime));
+	} else {
+		Common::Launcher::Osk::Get().Closed();
+	}
 	bool capture_controller = false;
 	bool capture_keyboard   = false;
 	bool text_input         = false;
@@ -396,7 +512,9 @@ void RefreshVisibility() {
 		capture_controller = true;
 		capture_keyboard   = true;
 	} else if (snapshot.session.kind == OverlayKind::Ime) {
-		capture_controller = (snapshot.ime.disable_device & Ime::DISABLE_DEVICE_CONTROLLER) == 0;
+		// The shell reads the controller for its keyboard, so the game mustn't see it either
+		capture_controller = (snapshot.ime.disable_device & Ime::DISABLE_DEVICE_CONTROLLER) == 0 ||
+		                     LauncherKeyboard::Owns(snapshot.session.generation);
 		capture_keyboard   = (snapshot.ime.disable_device & Ime::DISABLE_DEVICE_EXT_KEYBOARD) == 0;
 		text_input         = capture_keyboard;
 		multiline          = (snapshot.ime.option & Ime::OPTION_MULTILINE) != 0;
@@ -416,6 +534,10 @@ void RefreshVisibility() {
 			g_missing_visibility_wakeups++;
 		}
 	}
+}
+
+void RefreshVisibility() {
+	UpdateVisibility(false);
 }
 
 void OnCoreVisibilityChanged(bool, uint64_t) {
@@ -665,6 +787,9 @@ void InitializeSystemOverlayInput(SDL_Window* window) {
 		g_input_lifecycle_active = true;
 		g_visibility_event.store(type, std::memory_order_release);
 	}
+	Common::Launcher::Osk::Get().SetIme(LauncherKeyboard::MakeIme());
+	// The launcher's keyboard came or went with the game's open: who reads the controller changes
+	Common::Launcher::Osk::Get().SetOwnerChanged([]() { UpdateVisibility(true); });
 	CoreIme::SetVisibilityCallback(OnCoreVisibilityChanged);
 	DialogIme::SetVisibilityCallback(OnDialogVisibilityChanged);
 	SystemDialog::SetVisibilityCallback(RefreshVisibility);
@@ -676,6 +801,8 @@ void ShutdownSystemOverlayInput() {
 	CoreIme::SetVisibilityCallback(nullptr);
 	DialogIme::SetVisibilityCallback(nullptr);
 	SystemDialog::SetVisibilityCallback(nullptr);
+	Common::Launcher::Osk::Get().SetOwnerChanged(nullptr);
+	Common::Launcher::Osk::Get().SetIme(nullptr);
 	{
 		std::scoped_lock lock(g_visibility_mutex);
 		g_input_lifecycle_active = false;
@@ -1153,6 +1280,11 @@ struct SystemOverlay::Impl {
 			}
 			switch (event.kind) {
 				case InputKind::Button: {
+					// The shell's keyboard reads the controller itself
+					if (session.kind == OverlayKind::Ime &&
+					    LauncherKeyboard::Owns(session.generation)) {
+						break;
+					}
 					const bool down = event.x != 0.0f;
 					if (session.kind == OverlayKind::Ime && down) {
 						if (event.id == SDL_GAMEPAD_BUTTON_EAST) {
@@ -1168,6 +1300,10 @@ struct SystemOverlay::Impl {
 					break;
 				}
 				case InputKind::Axis: {
+					if (session.kind == OverlayKind::Ime &&
+					    LauncherKeyboard::Owns(session.generation)) {
+						break;
+					}
 					const float value = event.x / (event.x < 0.0f ? 32768.0f : 32767.0f);
 					if (event.id == SDL_GAMEPAD_AXIS_LEFTX) {
 						io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, value < -0.25f,
@@ -1835,7 +1971,8 @@ struct SystemOverlay::Impl {
 		if (has_overlay && snapshot.session == prepared_session) {
 			if (snapshot.session.kind == OverlayKind::Dialog) {
 				DrawDialog(snapshot.dialog, frame_extent);
-			} else {
+			} else if (!LauncherKeyboard::Owns(snapshot.session.generation)) {
+				// (The shell draws the launcher's keyboard into the frame itself)
 				DrawIme(snapshot.ime, frame_extent);
 			}
 		}

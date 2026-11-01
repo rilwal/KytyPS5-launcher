@@ -589,4 +589,9 @@ bool HostQueueExternalInput(uint64_t generation, ExternalInput input) {
 	return true;
 }
 
+size_t HostPendingInputs(uint64_t generation) {
+	std::scoped_lock lock(g_mutex);
+	return MatchRunningGeneration(generation) ? g_state.external_inputs.size() : 0;
+}
+
 } // namespace Libs::Dialog::ImeDialog

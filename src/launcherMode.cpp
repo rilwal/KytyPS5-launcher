@@ -1,5 +1,6 @@
 #include "launcherMode.h"
 
+#include "common/launcher/osk.h"
 #include "common/launcher/overlayPorts.h"
 #include "common/launcher/session.h"
 #include "common/launcher/settings.h"
@@ -230,6 +231,19 @@ static Launcher::Handlers MakeHandlers() {
 		Libs::Graphics::LauncherOverlay::SetVisible(visible);
 	};
 
+	// The launcher's keyboard in place of Kyty's own (common/launcher/osk.h)
+	handlers.osk_available = [](bool available) {
+		LOGF("[Launcher] the launcher's keyboard is %s\n",
+		     available ? "available" : "not available");
+		Launcher::Osk::Get().Available(available);
+	};
+	handlers.osk_edit = [](uint32_t osk, uint64_t seq, const Launcher::OskEdit& edit) {
+		Launcher::Osk::Get().Edit(osk, seq, edit);
+	};
+	handlers.osk_finish = [](uint32_t osk, bool accepted) {
+		Launcher::Osk::Get().Finish(osk, accepted);
+	};
+
 	return handlers;
 }
 
@@ -242,8 +256,29 @@ bool Start(Config::ConfigOptions& config) {
 	std::vector<std::string> capabilities;
 	if (Launcher::OverlayPorts::Supported()) {
 		capabilities.emplace_back("composited_overlay");
+		// Drawn the same way as the quick menu
+		capabilities.emplace_back("osk");
 		Overlay::Start();
 	}
+
+	// Set first: osk_available can come as soon as the overlay sends view
+	auto sender  = std::make_shared<Launcher::Osk::Sender>();
+	sender->open = [](const Launcher::OskOpen& open) {
+		if (auto* session = Launcher::Session::Get(); session != nullptr) {
+			session->OskOpen(open);
+		}
+	};
+	sender->text = [](uint32_t osk, uint64_t seq, std::string_view text, uint32_t cursor) {
+		if (auto* session = Launcher::Session::Get(); session != nullptr) {
+			session->OskText(osk, seq, text, cursor);
+		}
+	};
+	sender->closed = [](uint32_t osk, std::string_view result) {
+		if (auto* session = Launcher::Session::Get(); session != nullptr) {
+			session->OskClosed(osk, result);
+		}
+	};
+	Launcher::Osk::Get().SetSender(sender);
 
 	auto* session = Launcher::Session::Connect(MakeHandlers(), capabilities);
 	if (session == nullptr) {

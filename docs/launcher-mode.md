@@ -84,6 +84,29 @@ is. It follows the launcher's "Composited overlay" protocol (`docs/plugin-api.md
 macOS (IOSurfaces over Mach ports) and Windows aren't done; there the launcher's window comes to
 the front.
 
+## The launcher's keyboard
+
+Where the quick menu is drawn into the game, the launcher's on-screen keyboard is too, in place of
+Kyty's own (the launcher's "On-screen keyboard", plugin API 4). Kyty declares `osk` with
+`composited_overlay`; while the launcher says `osk_available`, a keyboard the game opens (the IME
+dialog or the core IME, `src/graphics/presentation/systemOverlay.cpp`) goes to the launcher:
+
+- Kyty sends `osk_open` with the field as the game set it up: its type, title, placeholder, text,
+  most characters, Enter key and where the game anchored it (as thousandths of the screen, from
+  its 1920x1080 or 3840x2160 coordinates).
+- The game's IME keeps the text, so its length and filter apply. Each `osk_edit` is applied to it,
+  and `osk_text` goes back once the text changes, with the last edit it includes. The core IME
+  applies keys on the game's next update, so the text goes back after that
+  (`src/common/launcher/osk.cpp` checks it every 16 ms while the launcher's keyboard is up). Delete
+  and replace need the text as it will be, so they wait until the IME has applied the keys before
+  them; the cursor moves a character at a time, as the arrow keys do.
+- `osk_finish` accepts or cancels the IME as Kyty's Done or Cancel would. When the game closes it,
+  Kyty sends `osk_closed` with how it ended; when the launcher stops offering keyboards with one
+  open, it's closed as aborted and Kyty's own shows instead. A game that keeps its keyboard open a
+  second after Done (taking it as a key) gets the launcher's keyboard back.
+- Kyty draws nothing for it and leaves the controller to the launcher; a real keyboard still types
+  into the IME, and the launcher sees the text change.
+
 ## Settings
 
 The options the launcher shows are in `src/common/launcher/settings.cpp`. Keys are the
@@ -136,6 +159,7 @@ or a game-launcher checkout's when `KYTY_LAUNCHER_EXAMPLES_DIR` points at it.
 - The user name and console language are global only, since game settings can't be text and the
   plugin isn't sent their values (it needs the language for trophies). Trophy lists aren't sent
   again when the language changes.
-- The composited quick menu on macOS and Windows.
+- The composited quick menu and keyboard on macOS and Windows.
+- The launcher's keyboard is Latin only for now; a game asking for another language gets it anyway.
 - An HDR game's frame is copied for the menu's background without tone mapping, so it looks off.
 - Shader compilation progress as an `activity`.
