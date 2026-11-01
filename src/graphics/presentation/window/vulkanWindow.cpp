@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/launcher/overlayPorts.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -1147,7 +1148,7 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
 		}
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_DMA_BUF_OVERLAY
 		// The launcher's overlay is shared as linear dma-bufs (graphics/presentation/launcherOverlay.cpp)
 		if (const std::array dma_buf_extensions {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 		                                         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
