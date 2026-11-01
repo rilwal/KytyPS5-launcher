@@ -205,6 +205,10 @@ bool AmdCpuEnabled() {
 	return g_config->amd_cpu_enabled;
 }
 
+bool GuestTscEnabled() {
+	return g_config->guest_tsc_enabled;
+}
+
 uint32_t GetVblankFrequency() {
 	return std::clamp(g_live.vblank_frequency.load(std::memory_order_relaxed), 30u, 360u);
 }
