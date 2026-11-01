@@ -412,7 +412,8 @@ void Session::Dispatch(const std::string& frame) {
 			m_handlers.osk_available(msg.available);
 		}
 	} else if (msg.type == "osk_edit") {
-		if (m_handlers.osk_edit && !msg.edit.op.empty()) {
+		// A key this Kyty doesn't know still counts as handled
+		if (m_handlers.osk_edit) {
 			m_handlers.osk_edit(msg.osk, msg.seq, msg.edit);
 		}
 	} else if (msg.type == "osk_finish") {

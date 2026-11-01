@@ -97,10 +97,13 @@ dialog or the core IME, `src/graphics/presentation/systemOverlay.cpp`) goes to t
 - The game's IME keeps the text, so its length and filter apply. Each `osk_edit` is applied to it,
   and `osk_text` goes back once the text changes, with the last edit it includes. The core IME
   applies keys on the game's next update, so the text goes back after that
-  (`src/common/launcher/osk.cpp` checks it every 16 ms while the launcher's keyboard is up).
+  (`src/common/launcher/osk.cpp` checks it every 16 ms while the launcher's keyboard is up). Delete
+  and replace need the text as it will be, so they wait until the IME has applied the keys before
+  them; the cursor moves a character at a time, as the arrow keys do.
 - `osk_finish` accepts or cancels the IME as Kyty's Done or Cancel would. When the game closes it,
   Kyty sends `osk_closed` with how it ended; when the launcher stops offering keyboards with one
-  open, it's closed as aborted and Kyty's own shows instead.
+  open, it's closed as aborted and Kyty's own shows instead. A game that keeps its keyboard open a
+  second after Done (taking it as a key) gets the launcher's keyboard back.
 - Kyty draws nothing for it and leaves the controller to the launcher; a real keyboard still types
   into the IME, and the launcher sees the text change.
 

@@ -4,9 +4,11 @@
 #include "common/launcher/protocol.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -14,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 // The launcher's on-screen keyboard (its docs/plugin-api.md, "On-screen keyboard"): while the
 // shell draws the game's keyboards (osk_available), a keyboard the game opens is drawn by the shell
@@ -42,12 +45,13 @@ struct Field {
 
 // What the bridge does to the IME. Each returns false when the keyboard `generation` isn't open
 // (or the edit changed nothing). Some IMEs apply edits later, on the game's thread: `pending`
-// says how many are still waiting.
+// says how many are still waiting. `move` goes by characters, a step at a time, as the arrow keys
+// do (over a surrogate pair in one step).
 struct Ime {
 	std::function<bool(Field*)>                        snapshot;
 	std::function<bool(uint64_t, std::u16string_view)> insert;
 	std::function<bool(uint64_t)>                      backspace;
-	std::function<bool(uint64_t, int)>                 move; // By UTF-16 units
+	std::function<bool(uint64_t, int)>                 move; // By characters
 	std::function<bool(uint64_t)>                      accept;
 	std::function<bool(uint64_t)>                      cancel;
 	std::function<size_t(uint64_t)>                    pending;
@@ -71,6 +75,9 @@ public:
 
 	void SetIme(std::shared_ptr<const Ime> ime);
 	void SetSender(std::shared_ptr<const Sender> sender);
+	// Called when the launcher's offer coming or going moves an open keyboard between the shell and
+	// the overlay (outside the bridge's lock), so the overlay can say who reads the controller.
+	void SetOwnerChanged(std::function<void()> changed);
 
 	// The system overlay: the game opened keyboard `field.generation` (or the overlay noticed
 	// it), or none is open now.
@@ -86,8 +93,13 @@ public:
 	// for it and ignores the controller (which the shell reads), but takes the real keyboard.
 	[[nodiscard]] bool Owns(uint64_t generation) const;
 
-	// Sends the text if it changed since it was last sent.
+	// Hands the shell's keys to the IME (those that need the IME's text once it has applied the
+	// rest), and sends the text if it changed since it was last sent.
 	void Poll();
+
+	// How long a keyboard the player finished may stay open before it's the shell's again (a game
+	// that takes Done as a key and carries on)
+	static constexpr std::chrono::milliseconds FINISH_TIMEOUT {1000};
 
 private:
 	struct Open {
@@ -98,11 +110,17 @@ private:
 		std::u16string text;           // As the shell was last told
 		uint32_t       cursor = 0;
 		std::string    result = "aborted"; // How it closes: what the player chose, else aborted
+		std::deque<std::pair<uint64_t, OskEdit>>             keys; // Not handed to the IME yet
+		std::optional<std::chrono::steady_clock::time_point> finished_at;
 	};
 
 	void OpenLocked(const Field& field);
 	void CloseLocked();
 	void PollThread();
+	void HandOver(const Ime& ime, uint64_t generation, const OskEdit& edit);
+
+	std::mutex            m_poll_mutex; // One Poll at a time, so texts go out in order
+	std::function<void()> m_owner_changed;
 
 	mutable std::mutex            m_mutex;
 	std::shared_ptr<const Ime>    m_ime;

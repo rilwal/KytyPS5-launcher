@@ -122,19 +122,26 @@ bool HostQueueExternalInput(uint64_t generation, ExternalInput input) {
 	           : DialogIme::HostQueueExternalInput(generation, std::move(input));
 }
 
-// The core IME moves its cursor a step at a time, as the arrow keys do
-bool HostMoveCursor(uint64_t generation, int delta) {
-	if (!IsCoreGeneration(generation)) {
-		return DialogIme::HostMoveCursor(generation, delta);
-	}
-	for (int i = 0; i < std::abs(delta); i++) {
-		ExternalInput input;
-		input.action = delta < 0 ? ExternalAction::MoveLeft : ExternalAction::MoveRight;
-		if (!CoreIme::HostQueueExternalInput(UnpackGeneration(generation), std::move(input))) {
-			return false;
+// By `characters`, a step at a time as the arrow keys do: a step goes over a whole character (a
+// surrogate pair too) in both IMEs. The core IME queues them for the game's next update.
+bool HostMoveCursor(uint64_t generation, int characters) {
+	bool moved = false;
+	for (int i = 0; i < std::abs(characters); i++) {
+		const int step = characters < 0 ? -1 : 1;
+		if (!IsCoreGeneration(generation)) {
+			if (!DialogIme::HostMoveCursor(generation, step)) {
+				break;
+			}
+		} else {
+			ExternalInput input;
+			input.action = step < 0 ? ExternalAction::MoveLeft : ExternalAction::MoveRight;
+			if (!CoreIme::HostQueueExternalInput(UnpackGeneration(generation), std::move(input))) {
+				break;
+			}
 		}
+		moved = true;
 	}
-	return delta != 0;
+	return moved;
 }
 
 size_t HostPendingInputs(uint64_t generation) {
@@ -479,14 +486,15 @@ void RetryVisibilityWakeup() {
 	}
 }
 
-void RefreshVisibility() {
+// `force`: again for the same session, whose keyboard changed hands (the launcher's or Kyty's)
+void UpdateVisibility(bool force) {
 	std::scoped_lock visibility_lock(g_visibility_mutex);
 	if (!g_input_lifecycle_active) {
 		return;
 	}
 	OverlaySnapshot snapshot;
 	const bool      visible = GetOverlaySnapshot(&snapshot);
-	if (snapshot.session == g_session) {
+	if (snapshot.session == g_session && !force) {
 		return;
 	}
 	g_session               = snapshot.session;
@@ -526,6 +534,10 @@ void RefreshVisibility() {
 			g_missing_visibility_wakeups++;
 		}
 	}
+}
+
+void RefreshVisibility() {
+	UpdateVisibility(false);
 }
 
 void OnCoreVisibilityChanged(bool, uint64_t) {
@@ -776,6 +788,8 @@ void InitializeSystemOverlayInput(SDL_Window* window) {
 		g_visibility_event.store(type, std::memory_order_release);
 	}
 	Common::Launcher::Osk::Get().SetIme(LauncherKeyboard::MakeIme());
+	// The launcher's keyboard came or went with the game's open: who reads the controller changes
+	Common::Launcher::Osk::Get().SetOwnerChanged([]() { UpdateVisibility(true); });
 	CoreIme::SetVisibilityCallback(OnCoreVisibilityChanged);
 	DialogIme::SetVisibilityCallback(OnDialogVisibilityChanged);
 	SystemDialog::SetVisibilityCallback(RefreshVisibility);
@@ -787,6 +801,7 @@ void ShutdownSystemOverlayInput() {
 	CoreIme::SetVisibilityCallback(nullptr);
 	DialogIme::SetVisibilityCallback(nullptr);
 	SystemDialog::SetVisibilityCallback(nullptr);
+	Common::Launcher::Osk::Get().SetOwnerChanged(nullptr);
 	Common::Launcher::Osk::Get().SetIme(nullptr);
 	{
 		std::scoped_lock lock(g_visibility_mutex);

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 #include <cstdlib>
 #include <filesystem>
@@ -275,23 +276,40 @@ struct FakeIme {
 			if (!at(g)) return false;
 			run([this]() {
 				if (cursor > 0) {
-					text.erase(--cursor, 1);
+					const uint32_t from = cursor - (cursor >= 2 && Low(text[cursor - 1]) && High(text[cursor - 2]) ? 2 : 1);
+					text.erase(from, cursor - from);
+					cursor = from;
 				}
 			});
 			return true;
 		};
+		// By characters, a step at a time over a whole pair, as Kyty's IMEs move
 		ime->move = [this, at, run](uint64_t g, int by) {
 			if (!at(g)) return false;
-			run([this, by]() {
-				cursor = static_cast<uint32_t>(
-				    std::clamp<int64_t>(int64_t {cursor} + by, 0, static_cast<int64_t>(text.size())));
-			});
+			for (int i = 0; i < std::abs(by); i++) {
+				run([this, step = by < 0 ? -1 : 1]() { Step(step); });
+			}
 			return true;
 		};
 		ime->accept  = [this, at](uint64_t g) { return at(g) && (finished = "accept", true); };
 		ime->cancel  = [this, at](uint64_t g) { return at(g) && (finished = "cancel", true); };
 		ime->pending = [this](uint64_t) { return queued.size(); };
 		return ime;
+	}
+
+	static bool High(char16_t c) { return c >= 0xd800 && c <= 0xdbff; }
+	static bool Low(char16_t c) { return c >= 0xdc00 && c <= 0xdfff; }
+
+	// TextEditEngine::MoveCursor(+-1)
+	void Step(int d) {
+		int next = std::clamp<int>(static_cast<int>(cursor) + d, 0, static_cast<int>(text.size()));
+		if (d < 0 && next > 0 && next < static_cast<int>(text.size()) && Low(text[next]) && High(text[next - 1])) {
+			next--;
+		} else if (d > 0 && next > 0 && next < static_cast<int>(text.size()) && High(text[next - 1]) &&
+		           Low(text[next])) {
+			next++;
+		}
+		cursor = static_cast<uint32_t>(next);
 	}
 
 	void Update() {
@@ -399,6 +417,100 @@ void TestOsk() {
 		Check(!bridge.Owns(6) && sent.back() == "closed 2 aborted", "it's the game's own again");
 		bridge.Closed();
 		Check(sent.size() == 2, "and nothing more goes out for it");
+	}
+
+	// Keys that need the IME's text wait for it, and positions count characters
+	for (const bool deferred: {false, true}) {
+		std::vector<std::string> sent;
+		auto                     sender = std::make_shared<Osk::Sender>();
+		sender->open                    = [&](const Launcher::OskOpen&) { sent.emplace_back("open"); };
+		sender->text = [&](uint32_t, uint64_t seq, std::string_view text, uint32_t cursor) {
+			sent.push_back(std::to_string(seq) + " " + std::string(text) + " " + std::to_string(cursor));
+		};
+		sender->closed = [&](uint32_t, std::string_view result) { sent.push_back("closed " + std::string(result)); };
+		FakeIme ime;
+		ime.deferred = deferred;
+		ime.max      = 8;
+		Osk::Bridge bridge(false);
+		bridge.SetSender(sender);
+		bridge.SetIme(ime.Make());
+		bridge.Available(true);
+		uint64_t   seq  = 0;
+		const auto edit = [&](std::string op, std::string text = {}, int by = 0, uint32_t cursor = 0) {
+			Launcher::OskEdit e;
+			e.op     = std::move(op);
+			e.text   = std::move(text);
+			e.by     = by;
+			e.cursor = cursor;
+			bridge.Edit(1, ++seq, e);
+		};
+		const auto frame = [&]() {
+			ime.Update();
+			bridge.Poll();
+			ime.Update();
+			bridge.Poll();
+		};
+		ime.generation = 3;
+		ime.text       = Osk::Utf16("a😀b");
+		ime.cursor     = 1;
+		bridge.Opened(ime.Field());
+
+		edit("move", {}, 1);
+		frame();
+		Check(ime.cursor == 3, "a move of one goes over one emoji");
+		edit("move", {}, -1);
+		edit("delete");
+		frame();
+		Check(ime.text == Osk::Utf16("ab") && ime.cursor == 1, "delete takes the emoji after the cursor");
+
+		// Several keys in one frame of the game's
+		edit("insert", "x");
+		edit("move", {}, -1);
+		edit("insert", "c");
+		edit("replace", "xyz", 0, 2);
+		edit("insert", "!");
+		frame();
+		Check(ime.text == u"xy!z" && ime.cursor == 3, "replace replaces all of the text the keys before it made");
+		Check(sent.back() == std::to_string(seq) + " xy!z 3", "and the text goes back with the last key");
+
+		edit("future", "?");
+		frame();
+		Check(sent.back() == std::to_string(seq) + " xy!z 3", "a key from a newer launcher is answered");
+
+		// Done, then the offer goes before the game closes it: aborted, not done
+		bridge.Finish(1, true);
+		bridge.Available(false);
+		Check(sent.back() == "closed aborted", "the offer going first aborts a finished keyboard");
+	}
+
+	// A game that keeps its keyboard open after Done gets the shell's again
+	{
+		std::vector<std::string> sent;
+		auto                     sender = std::make_shared<Osk::Sender>();
+		sender->open = [&](const Launcher::OskOpen& o) { sent.push_back("open " + std::to_string(o.osk)); };
+		sender->text   = [&](uint32_t, uint64_t, std::string_view, uint32_t) {};
+		sender->closed = [&](uint32_t osk, std::string_view r) {
+			sent.push_back("closed " + std::to_string(osk) + " " + std::string(r));
+		};
+		FakeIme     ime;
+		Osk::Bridge bridge(false);
+		bridge.SetSender(sender);
+		bridge.SetIme(ime.Make());
+		int owner_changes = 0;
+		bridge.SetOwnerChanged([&]() { owner_changes++; });
+		ime.generation = 9;
+		bridge.Opened(ime.Field());
+		bridge.Available(true);
+		Check(owner_changes == 1 && bridge.Owns(9), "the offer takes an open keyboard, and says so");
+		bridge.Finish(1, true);
+		bridge.Poll();
+		Check(sent.back() == "open 1", "it waits a while for the game");
+		std::this_thread::sleep_for(Osk::Bridge::FINISH_TIMEOUT + std::chrono::milliseconds(50));
+		bridge.Poll();
+		Check(sent.size() == 3 && sent[1] == "closed 1 accepted" && sent[2] == "open 2" && bridge.Owns(9),
+		      "then it's the shell's again");
+		bridge.Available(false);
+		Check(owner_changes == 2 && !bridge.Owns(9), "and the overlay's when the offer goes");
 	}
 }
 

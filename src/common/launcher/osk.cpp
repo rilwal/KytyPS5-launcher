@@ -195,100 +195,100 @@ void Bridge::Closed() {
 
 void Bridge::Available(bool available) {
 	std::shared_ptr<const Ime> ime;
+	std::function<void()>      changed;
 	{
 		std::scoped_lock lock(m_mutex);
 		m_available = available;
 		if (!available) {
-			// The game shows its own from here (the overlay sees Owns turn false)
-			CloseLocked();
-			return;
+			// The game shows its own from here; the player didn't finish it, whatever they pressed
+			if (m_open) {
+				m_open->result = "aborted";
+				CloseLocked();
+				changed = m_owner_changed;
+			}
+		} else if (!m_open && m_ime_open != 0) {
+			ime = m_ime;
 		}
-		if (m_open || m_ime_open == 0) {
-			return;
-		}
-		ime = m_ime;
 	}
 	// One that was already open goes to the shell, with its text as it is now
 	Field field;
-	if (ime == nullptr || !ime->snapshot(&field)) {
-		return;
+	if (ime != nullptr && ime->snapshot(&field)) {
+		std::scoped_lock lock(m_mutex);
+		if (m_ime_open == field.generation && !m_open) {
+			OpenLocked(field);
+			changed = m_open ? m_owner_changed : nullptr;
+		}
 	}
-	std::scoped_lock lock(m_mutex);
-	if (m_ime_open == field.generation) {
-		OpenLocked(field);
+	// Outside the lock: the overlay asks the bridge who has it
+	if (changed) {
+		changed();
 	}
 }
 
+void Bridge::SetOwnerChanged(std::function<void()> changed) {
+	std::scoped_lock lock(m_mutex);
+	m_owner_changed = std::move(changed);
+}
+
 void Bridge::Edit(uint32_t osk, uint64_t seq, const OskEdit& edit) {
-	std::shared_ptr<const Ime> ime;
-	uint64_t                   generation = 0;
 	{
 		std::scoped_lock lock(m_mutex);
-		if (!m_open || m_open->id != osk || m_ime == nullptr) {
+		if (!m_open || m_open->id != osk) {
 			return;
 		}
-		ime        = m_ime;
-		generation = m_open->generation;
+		m_open->keys.emplace_back(seq, edit);
 	}
-	// Outside the lock: the IME may call back into the overlay, and the overlay into the bridge
+	Poll();
+}
+
+void Bridge::HandOver(const Ime& ime, uint64_t generation, const OskEdit& edit) {
+	// The IME's text, which is all of it by now for the keys that need it
 	const auto field = [&]() -> std::optional<Field> {
 		Field f;
-		if (ime->snapshot(&f) && f.generation == generation) {
+		if (ime.snapshot(&f) && f.generation == generation) {
 			return f;
 		}
 		return std::nullopt;
 	};
 	if (edit.op == "insert") {
-		ime->insert(generation, Utf16(edit.text));
+		ime.insert(generation, Utf16(edit.text));
 	} else if (edit.op == "backspace") {
-		ime->backspace(generation);
+		ime.backspace(generation);
+	} else if (edit.op == "move") {
+		if (edit.by != 0) {
+			ime.move(generation, edit.by);
+		}
 	} else if (edit.op == "delete") {
 		// The character after the cursor: step over it and take it back
 		if (const auto f = field(); f && f->cursor < f->text.size()) {
-			const uint32_t after = Units(f->text, Characters(f->text, f->cursor) + 1);
-			if (ime->move(generation, static_cast<int>(after - f->cursor))) {
-				ime->backspace(generation);
-			}
-		}
-	} else if (edit.op == "move") {
-		if (const auto f = field()) {
-			const auto here = static_cast<int64_t>(Characters(f->text, f->cursor));
-			const auto to   = std::clamp<int64_t>(
-                here + edit.by, 0, Characters(f->text, static_cast<uint32_t>(f->text.size())));
-			const auto units = static_cast<int>(Units(f->text, static_cast<uint32_t>(to))) -
-			                   static_cast<int>(f->cursor);
-			if (units != 0) {
-				ime->move(generation, units);
+			if (ime.move(generation, 1)) {
+				ime.backspace(generation);
 			}
 		}
 	} else if (edit.op == "replace") {
-		// All of it: delete what's there, type the new text, and put the cursor where it says
+		// All of it: from the end, take back every character, type the new text, and step back to
+		// where the cursor goes
 		if (const auto f = field()) {
-			const auto end = static_cast<uint32_t>(f->text.size());
-			if (end != f->cursor) {
-				ime->move(generation, static_cast<int>(end - f->cursor));
+			const auto size  = static_cast<uint32_t>(f->text.size());
+			const auto total = Characters(f->text, size);
+			const auto at    = Characters(f->text, f->cursor);
+			if (total > at) {
+				ime.move(generation, static_cast<int>(total - at));
 			}
-			for (uint32_t n = Characters(f->text, end); n > 0; n--) {
-				ime->backspace(generation);
+			for (uint32_t n = total; n > 0; n--) {
+				ime.backspace(generation);
 			}
 			const auto text = Utf16(edit.text);
 			if (!text.empty()) {
-				ime->insert(generation, text);
+				ime.insert(generation, text);
 			}
 			const auto chars = Characters(text, static_cast<uint32_t>(text.size()));
 			if (edit.cursor < chars) {
-				ime->move(generation, static_cast<int>(Units(text, edit.cursor)) -
-				                          static_cast<int>(text.size()));
+				ime.move(generation, -static_cast<int>(chars - edit.cursor));
 			}
 		}
 	}
-	{
-		std::scoped_lock lock(m_mutex);
-		if (m_open && m_open->id == osk) {
-			m_open->applied = std::max(m_open->applied, seq);
-		}
-	}
-	Poll();
+	// Anything else, from a newer launcher, is a key that does nothing here
 }
 
 void Bridge::Finish(uint32_t osk, bool accepted) {
@@ -299,9 +299,10 @@ void Bridge::Finish(uint32_t osk, bool accepted) {
 		if (!m_open || m_open->id != osk || m_ime == nullptr) {
 			return;
 		}
-		m_open->result = accepted ? "accepted" : "cancelled";
-		ime            = m_ime;
-		generation     = m_open->generation;
+		m_open->result      = accepted ? "accepted" : "cancelled";
+		m_open->finished_at = std::chrono::steady_clock::now();
+		ime                 = m_ime;
+		generation          = m_open->generation;
 	}
 	// The IME closing reaches Closed through the overlay, which says so to the launcher
 	if (accepted) {
@@ -316,6 +317,7 @@ bool Bridge::Owns(uint64_t generation) const {
 }
 
 void Bridge::Poll() {
+	std::scoped_lock           poll(m_poll_mutex);
 	std::shared_ptr<const Ime> ime;
 	uint32_t                   id         = 0;
 	uint64_t                   generation = 0;
@@ -328,17 +330,62 @@ void Bridge::Poll() {
 		id         = m_open->id;
 		generation = m_open->generation;
 	}
-	Field field;
+
+	// The shell's keys, in order. Delete and replace need the IME's text as it will be, so they
+	// (and the keys after them) wait until the IME has applied every key before them.
+	for (;;) {
+		std::optional<std::pair<uint64_t, OskEdit>> key;
+		{
+			std::scoped_lock lock(m_mutex);
+			if (!m_open || m_open->id != id || m_open->keys.empty()) {
+				break;
+			}
+			key = m_open->keys.front();
+		}
+		const bool needs_text = key->second.op == "delete" || key->second.op == "replace";
+		if (needs_text && ime->pending(generation) != 0) {
+			break;
+		}
+		// Outside the lock: the IME may call back into the overlay, and the overlay into the bridge
+		HandOver(*ime, generation, key->second);
+		std::scoped_lock lock(m_mutex);
+		if (!m_open || m_open->id != id) {
+			return;
+		}
+		m_open->keys.pop_front();
+		m_open->applied = std::max(m_open->applied, key->first);
+	}
+
+	// The text, and the last key it's sure to include: one handed over before the IME said it had
+	// nothing waiting, read before the text
+	uint64_t applied = 0;
+	{
+		std::scoped_lock lock(m_mutex);
+		if (!m_open || m_open->id != id) {
+			return;
+		}
+		applied = m_open->applied;
+	}
+	const bool caught_up = ime->pending(generation) == 0;
+	Field      field;
 	if (!ime->snapshot(&field) || field.generation != generation) {
 		return;
 	}
-	const bool       caught_up = ime->pending(generation) == 0;
 	std::scoped_lock lock(m_mutex);
 	if (!m_open || m_open->id != id || m_sender == nullptr) {
 		return;
 	}
-	auto&      open     = *m_open;
-	const auto reported = caught_up ? open.applied : open.reported;
+	auto& open = *m_open;
+	// Finished, but the game kept it open: the shell's again, as a new keyboard
+	if (open.finished_at &&
+	    std::chrono::steady_clock::now() - *open.finished_at >= FINISH_TIMEOUT) {
+		CloseLocked();
+		if (m_ime_open == field.generation) {
+			OpenLocked(field);
+		}
+		return;
+	}
+	const auto reported = caught_up ? std::max(open.reported, applied) : open.reported;
 	if (field.text == open.text && field.cursor == open.cursor && reported == open.reported) {
 		return;
 	}
