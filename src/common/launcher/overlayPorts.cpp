@@ -4,7 +4,8 @@
 
 #include <mutex>
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+// macOS builds as KYTY_PLATFORM_LINUX but has no dma-bufs (nor SOCK_CLOEXEC), so it takes the stubs
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -17,7 +18,7 @@
 
 namespace Common::Launcher::OverlayPorts {
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 
 static std::mutex g_mutex;
 
