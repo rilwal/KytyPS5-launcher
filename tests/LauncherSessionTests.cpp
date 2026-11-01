@@ -239,6 +239,7 @@ struct FakeIme {
 	bool                     deferred = false;
 	std::vector<std::function<void()>> queued;
 	std::string              finished; // accept or cancel
+	std::u16string           finished_text; // The text the game read then
 
 	std::shared_ptr<const Launcher::Osk::Ime> Make() {
 		auto ime      = std::make_shared<Launcher::Osk::Ime>();
@@ -291,8 +292,17 @@ struct FakeIme {
 			}
 			return true;
 		};
-		ime->accept  = [this, at](uint64_t g) { return at(g) && (finished = "accept", true); };
-		ime->cancel  = [this, at](uint64_t g) { return at(g) && (finished = "cancel", true); };
+		// Queued like a key on the core IME
+		ime->accept = [this, at, run](uint64_t g) {
+			if (!at(g)) return false;
+			run([this]() { finished = "accept", finished_text = text; });
+			return true;
+		};
+		ime->cancel = [this, at, run](uint64_t g) {
+			if (!at(g)) return false;
+			run([this]() { finished = "cancel", finished_text = text; });
+			return true;
+		};
 		ime->pending = [this](uint64_t) { return queued.size(); };
 		return ime;
 	}
@@ -402,6 +412,7 @@ void TestOsk() {
 
 		// Done: the IME accepts; its closing tells the launcher
 		bridge.Finish(1, true);
+		ime.Update();
 		Check(ime.finished == "accept", "done accepts the game's keyboard");
 		ime.generation = 0;
 		bridge.Closed();
@@ -476,6 +487,13 @@ void TestOsk() {
 		edit("future", "?");
 		frame();
 		Check(sent.back() == std::to_string(seq) + " xy!z 3", "a key from a newer launcher is answered");
+
+		// Done right after a key that waits: the game reads the text with it
+		edit("move", {}, -1);
+		edit("delete");
+		bridge.Finish(1, true);
+		frame();
+		Check(ime.finished == "accept" && ime.finished_text == u"xyz", "done comes after the keys before it");
 
 		// Done, then the offer goes before the game closes it: aborted, not done
 		bridge.Finish(1, true);

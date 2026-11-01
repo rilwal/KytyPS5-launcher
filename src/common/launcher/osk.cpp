@@ -12,6 +12,9 @@ namespace {
 // the shell's keys (a real keyboard, the game's filter, an IME applying keys on the game's thread)
 constexpr std::chrono::milliseconds POLL {16};
 
+// The most steps a replace takes (it's left undone past that): the core IME queues 128 keys
+constexpr uint32_t MAX_REPLACE_STEPS = 120;
+
 bool High(char16_t c) {
 	return c >= 0xd800 && c <= 0xdbff;
 }
@@ -162,7 +165,11 @@ void Bridge::OpenLocked(const Field& field) {
 	msg.enter     = field.enter;
 	msg.anchor    = field.anchor;
 	m_sender->open(msg);
-	m_open = Open {m_next_id, field.generation, 0, 0, field.text, field.cursor};
+	m_open             = Open {};
+	m_open->id         = m_next_id;
+	m_open->generation = field.generation;
+	m_open->text       = field.text;
+	m_open->cursor     = field.cursor;
 	m_owned.store(field.generation, std::memory_order_release);
 	if (m_poll && !m_thread.joinable()) {
 		m_thread = std::thread([this]() { PollThread(); });
@@ -272,17 +279,21 @@ void Bridge::HandOver(const Ime& ime, uint64_t generation, const OskEdit& edit) 
 			const auto size  = static_cast<uint32_t>(f->text.size());
 			const auto total = Characters(f->text, size);
 			const auto at    = Characters(f->text, f->cursor);
+			const auto text  = Utf16(edit.text);
+			const auto chars = Characters(text, static_cast<uint32_t>(text.size()));
+			// A step each, and the core IME queues no more than 128 at a time
+			if ((total - at) + total + 1 + chars > MAX_REPLACE_STEPS) {
+				return;
+			}
 			if (total > at) {
 				ime.move(generation, static_cast<int>(total - at));
 			}
 			for (uint32_t n = total; n > 0; n--) {
 				ime.backspace(generation);
 			}
-			const auto text = Utf16(edit.text);
 			if (!text.empty()) {
 				ime.insert(generation, text);
 			}
-			const auto chars = Characters(text, static_cast<uint32_t>(text.size()));
 			if (edit.cursor < chars) {
 				ime.move(generation, -static_cast<int>(chars - edit.cursor));
 			}
@@ -292,24 +303,16 @@ void Bridge::HandOver(const Ime& ime, uint64_t generation, const OskEdit& edit) 
 }
 
 void Bridge::Finish(uint32_t osk, bool accepted) {
-	std::shared_ptr<const Ime> ime;
-	uint64_t                   generation = 0;
 	{
 		std::scoped_lock lock(m_mutex);
-		if (!m_open || m_open->id != osk || m_ime == nullptr) {
+		if (!m_open || m_open->id != osk || m_open->finish) {
 			return;
 		}
-		m_open->result      = accepted ? "accepted" : "cancelled";
-		m_open->finished_at = std::chrono::steady_clock::now();
-		ime                 = m_ime;
-		generation          = m_open->generation;
+		m_open->result = accepted ? "accepted" : "cancelled";
+		// After the keys before it, which may still be waiting for the IME
+		m_open->finish = accepted;
 	}
-	// The IME closing reaches Closed through the overlay, which says so to the launcher
-	if (accepted) {
-		ime->accept(generation);
-	} else {
-		ime->cancel(generation);
-	}
+	Poll();
 }
 
 bool Bridge::Owns(uint64_t generation) const {
@@ -354,6 +357,27 @@ void Bridge::Poll() {
 		}
 		m_open->keys.pop_front();
 		m_open->applied = std::max(m_open->applied, key->first);
+	}
+
+	// Done or cancel, once every key before it is handed over. The IME closing reaches Closed
+	// through the overlay, which says so to the launcher.
+	std::optional<bool> finish;
+	{
+		std::scoped_lock lock(m_mutex);
+		if (!m_open || m_open->id != id) {
+			return;
+		}
+		if (m_open->keys.empty() && m_open->finish && !m_open->finished_at) {
+			finish              = m_open->finish;
+			m_open->finished_at = std::chrono::steady_clock::now();
+		}
+	}
+	if (finish) {
+		if (*finish) {
+			ime->accept(generation);
+		} else {
+			ime->cancel(generation);
+		}
 	}
 
 	// The text, and the last key it's sure to include: one handed over before the IME said it had

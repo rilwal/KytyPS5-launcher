@@ -111,7 +111,8 @@ private:
 		uint32_t       cursor = 0;
 		std::string    result = "aborted"; // How it closes: what the player chose, else aborted
 		std::deque<std::pair<uint64_t, OskEdit>>             keys; // Not handed to the IME yet
-		std::optional<std::chrono::steady_clock::time_point> finished_at;
+		std::optional<bool> finish; // Done (true) or cancel, handed over after the keys before it
+		std::optional<std::chrono::steady_clock::time_point> finished_at; // When it was handed over
 	};
 
 	void OpenLocked(const Field& field);
