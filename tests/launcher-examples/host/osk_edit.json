@@ -1,0 +1,9 @@
+{
+  "type": "osk_edit",
+  "osk": 1,
+  "seq": 4,
+  "edit": {
+    "op": "insert",
+    "text": "é"
+  }
+}

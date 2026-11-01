@@ -23,8 +23,9 @@ namespace Common::Launcher {
 static constexpr const char* ENV_ENDPOINT = "LAUNCHER_ENDPOINT";
 static constexpr const char* ENV_SESSION  = "LAUNCHER_SESSION";
 
-// The plugin API version Kyty speaks. It uses unlocked.at and messages newer than API 1.
-static constexpr int PLUGIN_API = 2;
+// The plugin API version Kyty speaks. It uses unlocked.at and messages newer than API 1, and the
+// on-screen keyboard (osk) from API 4.
+static constexpr int PLUGIN_API = 4;
 
 // Minimum time between two updates of one activity.
 static constexpr auto ACTIVITY_INTERVAL = std::chrono::milliseconds(100);
@@ -406,6 +407,18 @@ void Session::Dispatch(const std::string& frame) {
 		if (m_handlers.setting) {
 			m_handlers.setting(msg.key, msg.value);
 		}
+	} else if (msg.type == "osk_available") {
+		if (m_handlers.osk_available) {
+			m_handlers.osk_available(msg.available);
+		}
+	} else if (msg.type == "osk_edit") {
+		if (m_handlers.osk_edit && !msg.edit.op.empty()) {
+			m_handlers.osk_edit(msg.osk, msg.seq, msg.edit);
+		}
+	} else if (msg.type == "osk_finish") {
+		if (m_handlers.osk_finish) {
+			m_handlers.osk_finish(msg.osk, msg.accepted);
+		}
 	}
 	// accepted and anything newer are only logged
 }
@@ -418,6 +431,10 @@ void Session::Reader() {
 
 	// The process tree is what the launcher tracks, so losing the connection isn't fatal.
 	LOGF("[Launcher] connection closed\n");
+	// No shell draws keyboards now: the game shows its own
+	if (m_handlers.osk_available) {
+		m_handlers.osk_available(false);
+	}
 
 	// Nothing more will come, so boot needn't wait for configure.
 	std::lock_guard lock(m_configure_mutex);
@@ -580,6 +597,21 @@ void Session::View(uint32_t width, uint32_t height) {
 void Session::CaptureSurface(uint32_t id, uint32_t width, uint32_t height) {
 	LOGF("[Launcher] sending capture_surface %u (%ux%u)\n", id, width, height);
 	Send(CaptureSurfaceMsg(id, width, height));
+}
+
+void Session::OskOpen(const ::Common::Launcher::OskOpen& open) {
+	LOGF("[Launcher] sending osk_open %u (%s)\n", open.osk, open.kind.c_str());
+	Send(OskOpenMsg(open));
+}
+
+void Session::OskText(uint32_t osk, uint64_t seq, std::string_view text, uint32_t cursor) {
+	Send(OskTextMsg(osk, seq, text, cursor));
+}
+
+void Session::OskClosed(uint32_t osk, std::string_view result) {
+	LOGF("[Launcher] sending osk_closed %u (%.*s)\n", osk, static_cast<int>(result.size()),
+	     result.data());
+	Send(OskClosedMsg(osk, result));
 }
 
 } // namespace Common::Launcher

@@ -169,6 +169,40 @@ Message CaptureSurfaceMsg(uint32_t id, uint32_t width, uint32_t height) {
 	return Make({{"type", "capture_surface"}, {"id", id}, {"width", width}, {"height", height}});
 }
 
+Message OskOpenMsg(const OskOpen& open) {
+	Json msg = {{"type", "osk_open"},        {"osk", open.osk},       {"kind", open.kind},
+	            {"text", open.text},         {"cursor", open.cursor}, {"multiline", open.multiline},
+	            {"password", open.password}, {"enter", open.enter},   {"languages", Json::array()}};
+	if (!open.title.empty()) {
+		msg["title"] = open.title;
+	}
+	if (!open.placeholder.empty()) {
+		msg["placeholder"] = open.placeholder;
+	}
+	if (open.max_length) {
+		msg["max_length"] = *open.max_length;
+	}
+	if (open.anchor) {
+		msg["anchor"] = {{"x", open.anchor->x},
+		                 {"y", open.anchor->y},
+		                 {"align_x", open.anchor->align_x},
+		                 {"align_y", open.anchor->align_y}};
+	}
+	return Make(std::move(msg));
+}
+
+Message OskTextMsg(uint32_t osk, uint64_t seq, std::string_view text, uint32_t cursor) {
+	return Make({{"type", "osk_text"},
+	             {"osk", osk},
+	             {"seq", seq},
+	             {"text", std::string(text)},
+	             {"cursor", cursor}});
+}
+
+Message OskClosedMsg(uint32_t osk, std::string_view result) {
+	return Make({{"type", "osk_closed"}, {"osk", osk}, {"result", std::string(result)}});
+}
+
 // A SettingValue as text: externally tagged ({"Text": "150"}, {"Bool": true}), or a plain JSON
 // value. Null means the default.
 static std::optional<std::string> ValueText(const Json& value) {
@@ -228,6 +262,40 @@ HostMessage ParseHost(std::string_view frame) {
 	}
 	if (const auto it = obj.find("visible"); it != obj.end() && it->is_boolean()) {
 		msg.visible = it->get<bool>();
+	}
+	if (const auto it = obj.find("available"); it != obj.end() && it->is_boolean()) {
+		msg.available = it->get<bool>();
+	}
+	if (const auto it = obj.find("accepted"); it != obj.end() && it->is_boolean()) {
+		msg.accepted = it->get<bool>();
+	}
+	msg.osk = read_u32("osk");
+	if (const auto it = obj.find("seq"); it != obj.end() && it->is_number_unsigned()) {
+		msg.seq = it->get<uint64_t>();
+	}
+	if (const auto it = obj.find("edit"); it != obj.end() && it->is_object()) {
+		const auto                        field = [&](const char* name) { return it->find(name); };
+		static constexpr std::string_view OPS[] = {"insert", "backspace", "delete", "move",
+		                                           "replace"};
+		if (const auto op = field("op"); op != it->end() && op->is_string()) {
+			const auto name = op->get<std::string>();
+			if (std::find(std::begin(OPS), std::end(OPS), name) != std::end(OPS)) {
+				msg.edit.op = name;
+			}
+		}
+		if (const auto text = field("text"); text != it->end() && text->is_string()) {
+			msg.edit.text = text->get<std::string>();
+		}
+		if (const auto by = field("by"); by != it->end() && by->is_number_integer() &&
+		                                 by->get<int64_t>() >= INT32_MIN &&
+		                                 by->get<int64_t>() <= INT32_MAX) {
+			msg.edit.by = by->get<int32_t>();
+		}
+		if (const auto cursor = field("cursor"); cursor != it->end() &&
+		                                         cursor->is_number_unsigned() &&
+		                                         cursor->get<uint64_t>() <= UINT32_MAX) {
+			msg.edit.cursor = cursor->get<uint32_t>();
+		}
 	}
 	if (const auto it = obj.find("api"); it != obj.end() && it->is_number_integer()) {
 		msg.api = it->get<int>();
@@ -346,6 +414,18 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 	check(OverlayItemsMsg({slot}));
 	check(ViewMsg(3600, 2338));
 	check(CaptureSurfaceMsg(20, 3600, 2338));
+	OskOpen open;
+	open.osk         = 3;
+	open.kind        = "latin";
+	open.title       = "Character name";
+	open.placeholder = "Name";
+	open.text        = "Ann";
+	open.cursor      = 3;
+	open.max_length  = 16;
+	open.anchor      = OskOpen::Anchor {500, 900, "center", "end"};
+	check(OskOpenMsg(open));
+	check(OskTextMsg(3, 2, "Anne", 4));
+	check(OskClosedMsg(3, "accepted"));
 
 	// Everything Kyty reads, from the launcher's examples. The values are the ones its
 	// crates/proto/tests/examples.rs writes: a field it renamed reads as empty here.
@@ -363,7 +443,7 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 
 	if (const auto msg = host("accepted")) {
 		// The API Kyty speaks (session.cpp)
-		expect("accepted", msg->api == 3 && msg->title == "Demon's Souls");
+		expect("accepted", msg->api == 4 && msg->title == "Demon's Souls");
 	}
 	if (const auto msg = host("setting")) {
 		expect("setting", msg->key == "api_key" && msg->value == "0123456789ABCDEF");
@@ -382,6 +462,15 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 	}
 	if (const auto msg = host("overlay_visible")) {
 		expect("overlay_visible", msg->visible);
+	}
+	if (const auto msg = host("osk_available")) {
+		expect("osk_available", msg->available);
+	}
+	if (const auto msg = host("osk_edit")) {
+		expect("osk_edit", msg->osk != 0 && msg->seq != 0 && !msg->edit.op.empty());
+	}
+	if (const auto msg = host("osk_finish")) {
+		expect("osk_finish", msg->osk != 0 && msg->accepted);
 	}
 	// Only their type is read
 	for (std::string_view type: {"quit", "overlay_opened", "overlay_closed"}) {

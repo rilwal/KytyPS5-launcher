@@ -119,6 +119,8 @@ bool        HostMoveCursor(uint64_t generation, int delta);
 bool        HostAccept(uint64_t generation);
 bool        HostCancel(uint64_t generation);
 bool        HostQueueExternalInput(uint64_t generation, ExternalInput input);
+// Inputs queued for keyboard `generation` that the game's next status check applies
+size_t HostPendingInputs(uint64_t generation);
 
 } // namespace Libs::Dialog::ImeDialog
 

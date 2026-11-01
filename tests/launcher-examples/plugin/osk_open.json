@@ -1,0 +1,23 @@
+{
+  "type": "osk_open",
+  "osk": 1,
+  "kind": "text",
+  "title": "Name your save",
+  "placeholder": "Hero",
+  "text": "Ann",
+  "cursor": 3,
+  "max_length": 16,
+  "multiline": false,
+  "password": false,
+  "enter": "default",
+  "languages": [
+    "en",
+    "ja"
+  ],
+  "anchor": {
+    "x": 500,
+    "y": 950,
+    "align_x": "center",
+    "align_y": "end"
+  }
+}

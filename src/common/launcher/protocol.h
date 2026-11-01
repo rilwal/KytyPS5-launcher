@@ -71,6 +71,41 @@ using ConfigureValues = std::map<std::string, std::optional<std::string>>;
 [[nodiscard]] Message ViewMsg(uint32_t width, uint32_t height);
 [[nodiscard]] Message CaptureSurfaceMsg(uint32_t id, uint32_t width, uint32_t height);
 
+// osk: a keyboard the game asks for, drawn by the shell (the launcher's "On-screen keyboard")
+struct OskOpen {
+	uint32_t                osk  = 0;
+	std::string             kind = "text"; // text, latin, url, email or number
+	std::string             title;         // Empty for none
+	std::string             placeholder;   // Empty for none
+	std::string             text;
+	uint32_t                cursor = 0; // In characters (Unicode scalar values)
+	std::optional<uint32_t> max_length;
+	bool                    multiline = false;
+	bool                    password  = false;
+	std::string             enter     = "default"; // default, send, search or go
+	struct Anchor {
+		uint16_t    x       = 0; // Thousandths of the window
+		uint16_t    y       = 0;
+		std::string align_x = "start"; // start, center or end
+		std::string align_y = "start";
+	};
+	std::optional<Anchor> anchor;
+};
+[[nodiscard]] Message OskOpenMsg(const OskOpen& open);
+// The whole text after a change, with the last osk_edit it includes (0 for none)
+[[nodiscard]] Message OskTextMsg(uint32_t osk, uint64_t seq, std::string_view text,
+                                 uint32_t cursor);
+// result: accepted, cancelled or aborted
+[[nodiscard]] Message OskClosedMsg(uint32_t osk, std::string_view result);
+
+// A key from the shell's keyboard (osk_edit)
+struct OskEdit {
+	std::string op;   // insert, backspace, delete, move or replace; empty for one Kyty doesn't know
+	std::string text; // insert, replace
+	int32_t     by     = 0; // move
+	uint32_t    cursor = 0; // replace
+};
+
 // Launcher to plugin
 struct HostMessage {
 	std::string                type;
@@ -87,6 +122,11 @@ struct HostMessage {
 	uint32_t                   width   = 0;     // overlay_surface
 	uint32_t                   height  = 0;     // overlay_surface
 	bool                       visible = false; // overlay_visible
+	bool                       available = false; // osk_available
+	uint32_t                   osk       = 0;     // osk_edit, osk_finish
+	uint64_t                   seq       = 0;     // osk_edit
+	OskEdit                    edit;              // osk_edit
+	bool                       accepted = false;  // osk_finish
 	bool                       ok = true; // False if the frame wasn't a JSON object
 };
 
