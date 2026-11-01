@@ -12,7 +12,7 @@
 #include <random>
 #include <utility>
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+#if KYTY_DMA_BUF_OVERLAY
 #include <sys/mman.h>
 #include <sys/stat.h>
 #endif
@@ -121,7 +121,7 @@ bool WantsPresents() {
 	return g_visible || g_capture_requested || g_capture_reporting || g_presents_owed != 0;
 }
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+#if KYTY_DMA_BUF_OVERLAY
 
 // A BGRA8 image whose memory is a linear dma-buf, the shell's (imported) or Kyty's (exported)
 struct SharedImage {
