@@ -5,6 +5,7 @@
 #define LAUNCHER_CLIENT_PROTOCOL_H
 
 #include "launcher_client.h"
+#include "launcher_overlay.h"
 #include "launcher_runner.h"
 
 #include <cstdint>
@@ -41,6 +42,11 @@ Message achievement_progress(const char* id, uint32_t current, uint32_t total);
 Message overlay_items(const lc_setting* items, size_t count);
 Message view(uint32_t width, uint32_t height);
 Message capture_surface(uint32_t id, uint32_t width, uint32_t height);
+Message osk_open(uint32_t osk, const lc_osk_params& params);
+Message osk_text(uint32_t osk, uint64_t seq, const char* text, uint32_t cursor);
+Message osk_closed(uint32_t osk, lc_osk_result result);
+// Empty type if there's nothing to send (an unknown kind, or a key with no name)
+Message overlay_input(const lc_input& input);
 
 // Plugin runner to launcher
 Message library(const lc_game* games, size_t count, const char* const* warnings, size_t warning_count);
@@ -74,8 +80,20 @@ struct HostMessage {
 	std::string           service;
 	uint32_t              width  = 0;
 	uint32_t              height = 0;
-	// overlay_visible
-	bool visible = false;
+	bool                  lists  = false; // The buffers are draw-list slots
+	// overlay
+	bool pause = false; // The quick menu is open over the game
+	bool input = false; // The game's keys and mouse are the shell's
+	// osk_available, osk_edit, osk_finish
+	bool        available = false;
+	uint32_t    osk       = 0;
+	uint64_t    seq       = 0;
+	bool        accepted  = false;
+	bool        edit_ok   = false; // osk_edit's edit is one the library knows
+	lc_osk_op   edit_op   = LC_OSK_INSERT;
+	std::string edit_text;
+	int32_t     edit_by     = 0;
+	uint32_t    edit_cursor = 0;
 	// launch, list_achievements
 	uint64_t                 launch = 0;
 	uint64_t                 game   = 0;

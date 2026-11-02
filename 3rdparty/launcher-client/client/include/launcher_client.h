@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 /* The plugin API version the library speaks. */
-#define LC_PLUGIN_API 3
+#define LC_PLUGIN_API 6
 
 typedef struct lc_session lc_session;
 
@@ -45,12 +45,36 @@ enum {
 	LC_CAP_LAUNCH       = 1u << 2,
 	LC_CAP_ACHIEVEMENTS = 1u << 3,
 	LC_CAP_SETTINGS     = 1u << 4,
+	/* With LC_CAP_COMPOSITED_OVERLAY: the game's text input can go on the shell's on-screen
+	   keyboard, drawn into the game's frames, instead of the emulator's own (lc_osk_open). */
+	LC_CAP_OSK = 1u << 5,
+	/* With LC_CAP_COMPOSITED_OVERLAY: the emulator draws the shell's menu itself from draw lists
+	   (launcher_list.h, lc_frame.list), over its live frame, instead of drawing the buffers the
+	   shell drew. The shell then sends lists only, and wants no capture. */
+	LC_CAP_DRAW_LISTS = 1u << 6,
 };
 
 typedef enum lc_log_level {
 	LC_LOG_INFO  = 0,
 	LC_LOG_ERROR = 1,
 } lc_log_level;
+
+/* A key pressed on the shell's on-screen keyboard (lc_callbacks.osk_edit). Positions count
+   characters (Unicode scalar values), whatever the emulator stores text as. */
+typedef enum lc_osk_op {
+	LC_OSK_INSERT    = 0, /* `text` at the cursor */
+	LC_OSK_BACKSPACE = 1, /* The character before the cursor */
+	LC_OSK_DELETE    = 2, /* The character after the cursor */
+	LC_OSK_MOVE      = 3, /* The cursor, by `by` characters (negative is left) */
+	LC_OSK_REPLACE   = 4, /* All the text with `text`, the cursor at `cursor` (a composing keyboard) */
+} lc_osk_op;
+
+typedef struct lc_osk_edit {
+	lc_osk_op   op;
+	const char *text; /* LC_OSK_INSERT, LC_OSK_REPLACE; never NULL */
+	int32_t     by;   /* LC_OSK_MOVE */
+	uint32_t    cursor; /* LC_OSK_REPLACE */
+} lc_osk_edit;
 
 /* What the launcher asks of the game. Every member may be NULL. All but `log` are called on the
    library's reader thread, one at a time; they mustn't call lc_close. */
@@ -62,10 +86,10 @@ typedef struct lc_callbacks {
 
 	/* Save what's needed and exit. launcherd ends the process group 30 s later. */
 	void (*quit)(void *user);
-	/* The player opened (true) or closed (false) the quick menu. Pause if that suits the game,
-	   and say so with lc_paused. With the composited overlay the library also starts or stops
-	   the capture itself. */
-	void (*overlay)(void *user, bool opened);
+	/* The quick menu opened over the game (true) or closed (false). Pause if that suits the
+	   game, and say so with lc_paused. Called only when it changes. With the composited overlay
+	   the library also starts or stops the capture itself. */
+	void (*pause)(void *user, bool pause);
 	/* The player chose an overlay item: `value` is NULL for an action, "true"/"false" for a
 	   toggle, the option's value for a choice. */
 	void (*invoke)(void *user, const char *key, const char *value);
@@ -75,6 +99,17 @@ typedef struct lc_callbacks {
 	void (*setting)(void *user, const char *key, const char *value);
 	/* The connection ended. The process tree is what the launcher tracks, so this isn't fatal. */
 	void (*closed)(void *user);
+
+	/* On-screen keyboard (LC_CAP_OSK). Whether the shell can draw the game's keyboards now. When
+	   it turns false with one of the shell's open, that keyboard is closed as far as the library
+	   is concerned: show the emulator's own instead, with the text as it is. */
+	void (*osk_available)(void *user, bool available);
+	/* The player pressed a key on keyboard `osk`. Apply it with the emulator's own rules (length,
+	   the game's filter), then send the text with lc_osk_text, echoing `seq`. */
+	void (*osk_edit)(void *user, uint32_t osk, uint64_t seq, const lc_osk_edit *edit);
+	/* The player finished (`accepted`) or backed out of keyboard `osk`'s text. Close it as the
+	   emulator's own keyboard would, and say so with lc_osk_close. */
+	void (*osk_finish)(void *user, uint32_t osk, bool accepted);
 } lc_callbacks;
 
 typedef struct lc_connect_info {
@@ -205,6 +240,73 @@ typedef struct lc_setting {
 
 /* Replaces the quick-menu items. */
 void lc_overlay_items(lc_session *session, const lc_setting *items, size_t count);
+
+/* On-screen keyboard (docs/plugin-api.md, "On-screen keyboard"). With LC_CAP_OSK, the shell can
+   draw the keyboard a game asks for into the game's frames, as it does the quick menu. The
+   emulator keeps the text: the shell sends keys (lc_callbacks.osk_edit), and the emulator
+   applies them, along with whatever a real keyboard types, and sends the text after every change
+   (lc_osk_text). While the keyboard is open the game keeps running but stops reading the
+   controllers, which the shell reads. */
+
+/* Which keys the keyboard needs */
+typedef enum lc_osk_kind {
+	LC_OSK_TEXT   = 0, /* Anything, in the player's language */
+	LC_OSK_LATIN  = 1, /* ASCII letters, digits and marks */
+	LC_OSK_URL    = 2,
+	LC_OSK_EMAIL  = 3,
+	LC_OSK_NUMBER = 4, /* Digits only */
+} lc_osk_kind;
+
+/* What the key that finishes the text says */
+typedef enum lc_osk_enter {
+	LC_OSK_ENTER_DEFAULT = 0, /* "Done" */
+	LC_OSK_ENTER_SEND    = 1,
+	LC_OSK_ENTER_SEARCH  = 2,
+	LC_OSK_ENTER_GO      = 3,
+} lc_osk_enter;
+
+typedef enum lc_osk_align {
+	LC_OSK_ALIGN_START  = 0,
+	LC_OSK_ALIGN_CENTER = 1,
+	LC_OSK_ALIGN_END    = 2,
+} lc_osk_align;
+
+typedef struct lc_osk_params {
+	lc_osk_kind  kind;
+	const char  *title;       /* NULL or "" for none */
+	const char  *placeholder; /* Shown while the text is empty; NULL or "" for none */
+	const char  *text;        /* What's there already; NULL for none */
+	uint32_t     cursor;      /* Where in `text`, in characters */
+	uint32_t     max_length;  /* In characters; 0 for no limit */
+	bool         multiline;
+	bool         password;    /* Dots, not what's typed */
+	lc_osk_enter enter;
+	/* Language tags ("en", "ja") the game takes; none for any */
+	const char *const *languages;
+	size_t             language_count;
+	/* Where the game would have the keyboard: the point (x, y), from 0 to 1 across the window,
+	   that its edges (or middle) align_x and align_y go to. Ignored unless has_anchor. */
+	bool         has_anchor;
+	float        x, y;
+	lc_osk_align align_x, align_y;
+} lc_osk_params;
+
+typedef enum lc_osk_result {
+	LC_OSK_ACCEPTED  = 0, /* The player finished the text */
+	LC_OSK_CANCELLED = 1, /* The player backed out of it */
+	LC_OSK_ABORTED   = 2, /* The game closed it */
+} lc_osk_result;
+
+/* Whether the shell can draw a keyboard into the game now. Any thread. */
+bool lc_osk_available(lc_session *session);
+/* Asks the shell for a keyboard, returning its number, or 0 if the shell can't draw one now: show
+   the emulator's own then. One is open at a time; opening another closes the last (aborted). */
+uint32_t lc_osk_open(lc_session *session, const lc_osk_params *params);
+/* Keyboard `osk`'s text after a change, whatever made it: the shell's edit `seq` (the last one it
+   includes; 0 if none yet), a real keyboard, or the game. `cursor` is in characters. */
+void lc_osk_text(lc_session *session, uint32_t osk, uint64_t seq, const char *text, uint32_t cursor);
+/* Keyboard `osk` closed: the shell lets its surfaces go. */
+void lc_osk_close(lc_session *session, uint32_t osk, lc_osk_result result);
 
 /* Waits until everything queued so far is written, or `timeout_ms` passes. False on timeout. */
 bool lc_flush(lc_session *session, uint32_t timeout_ms);

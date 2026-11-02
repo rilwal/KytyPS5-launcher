@@ -1,218 +1,26 @@
-// The Vulkan helper on a real GPU: the "shell" exports three linear dma-bufs from the same device
-// and fills the first with a half-transparent red, the helper imports them, captures a blue game
-// frame, and draws the menu over it. The result has to be the premultiplied blend of the two.
-// Skipped where no device can share linear dma-bufs (lavapipe has no DRM format modifiers).
+// The Vulkan helper on a real GPU: the "shell" fills the first of its three buffers with a
+// half-transparent red, the helper imports them, captures a blue game frame, and draws the menu
+// over it. The result has to be the premultiplied blend of the two.
+// Linux: the buffers are linear dma-bufs exported from the same device; skipped where no device
+// can share them (lavapipe has no DRM format modifiers).
+// macOS: the buffers are IOSurfaces, as the shell makes them, and the capture is read back from
+// the IOSurface the shell gets. LC_TEST_VULKAN names the library to load (the Vulkan loader, or a
+// driver such as libMoltenVK.dylib); the loader's VK_DRIVER_FILES picks KosmicKrisp.
 #include "check.h"
 #include "fake_launcher.h"
+#if defined(__APPLE__)
+#include "fake_shell_macos.h"
+#else
 #include "fake_shell.h"
-#include "launcher_overlay_vk.h"
+#endif
+#include "vk_gpu.h"
 
 #include <cstdlib>
-#include <dlfcn.h>
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
-
-#define LC_TEST_FNS(X)                     \
-	X(EnumeratePhysicalDevices)            \
-	X(EnumerateDeviceExtensionProperties)  \
-	X(GetPhysicalDeviceQueueFamilyProperties) \
-	X(GetPhysicalDeviceMemoryProperties)   \
-	X(GetPhysicalDeviceProperties)         \
-	X(CreateDevice)                        \
-	X(DestroyInstance)                     \
-	X(DestroyDevice)                       \
-	X(GetDeviceQueue)                      \
-	X(DeviceWaitIdle)                      \
-	X(QueueSubmit)                         \
-	X(QueueWaitIdle)                       \
-	X(CreateCommandPool)                   \
-	X(DestroyCommandPool)                  \
-	X(AllocateCommandBuffers)              \
-	X(BeginCommandBuffer)                  \
-	X(EndCommandBuffer)                    \
-	X(ResetCommandBuffer)                  \
-	X(CreateImage)                         \
-	X(DestroyImage)                        \
-	X(CreateImageView)                     \
-	X(DestroyImageView)                    \
-	X(GetImageMemoryRequirements)          \
-	X(GetImageSubresourceLayout)           \
-	X(CreateBuffer)                        \
-	X(DestroyBuffer)                       \
-	X(GetBufferMemoryRequirements)         \
-	X(BindBufferMemory)                    \
-	X(AllocateMemory)                      \
-	X(FreeMemory)                          \
-	X(BindImageMemory)                     \
-	X(MapMemory)                           \
-	X(GetMemoryFdKHR)                      \
-	X(CreateRenderPass)                    \
-	X(DestroyRenderPass)                   \
-	X(CreateFramebuffer)                   \
-	X(DestroyFramebuffer)                  \
-	X(CmdBeginRenderPass)                  \
-	X(CmdEndRenderPass)                    \
-	X(CmdClearColorImage)                  \
-	X(CmdPipelineBarrier)                  \
-	X(CmdCopyImageToBuffer)
-
-struct Gpu {
-	void*                     lib  = nullptr;
-	PFN_vkGetInstanceProcAddr gipa = nullptr;
-	VkInstance                instance = VK_NULL_HANDLE;
-	VkPhysicalDevice          physical = VK_NULL_HANDLE;
-	VkDevice                  device   = VK_NULL_HANDLE;
-	uint32_t                  family   = 0;
-	VkQueue                   queue    = VK_NULL_HANDLE;
-	VkCommandPool             pool     = VK_NULL_HANDLE;
-	VkCommandBuffer           command  = VK_NULL_HANDLE;
-	VkPhysicalDeviceMemoryProperties memory {};
-#define LC_TEST_DECLARE(name) PFN_vk##name name = nullptr;
-	LC_TEST_FNS(LC_TEST_DECLARE)
-#undef LC_TEST_DECLARE
-
-	// The reason to skip, or "" once it has a device that can share dma-bufs
-	std::string open() {
-		lib = ::dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-		if (lib == nullptr) {
-			return "no Vulkan loader";
-		}
-		gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(::dlsym(lib, "vkGetInstanceProcAddr"));
-		auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(gipa(VK_NULL_HANDLE, "vkCreateInstance"));
-		VkApplicationInfo app {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-		app.apiVersion = VK_API_VERSION_1_3;
-		VkInstanceCreateInfo ici {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-		ici.pApplicationInfo = &app;
-		if (create_instance == nullptr || create_instance(&ici, nullptr, &instance) != VK_SUCCESS) {
-			return "no Vulkan instance";
-		}
-#define LC_TEST_LOAD(name) name = reinterpret_cast<PFN_vk##name>(gipa(instance, "vk" #name));
-		LC_TEST_FNS(LC_TEST_LOAD)
-#undef LC_TEST_LOAD
-
-		uint32_t extension_count = 0;
-		const char* const* wanted = lc_vk_device_extensions(&extension_count);
-		uint32_t count = 0;
-		EnumeratePhysicalDevices(instance, &count, nullptr);
-		std::vector<VkPhysicalDevice> devices(count);
-		EnumeratePhysicalDevices(instance, &count, devices.data());
-		for (auto candidate: devices) {
-			uint32_t n = 0;
-			EnumerateDeviceExtensionProperties(candidate, nullptr, &n, nullptr);
-			std::vector<VkExtensionProperties> have(n);
-			EnumerateDeviceExtensionProperties(candidate, nullptr, &n, have.data());
-			bool all = true;
-			for (uint32_t i = 0; i < extension_count; i++) {
-				bool found = false;
-				for (const auto& e: have) {
-					found = found || std::string(e.extensionName) == wanted[i];
-				}
-				all = all && found;
-			}
-			if (all) {
-				physical = candidate;
-				break;
-			}
-		}
-		if (physical == VK_NULL_HANDLE) {
-			return "no device with the extensions the helper needs";
-		}
-		VkPhysicalDeviceProperties props {};
-		GetPhysicalDeviceProperties(physical, &props);
-		std::printf("vk: using %s\n", props.deviceName);
-		GetPhysicalDeviceMemoryProperties(physical, &memory);
-
-		uint32_t families = 0;
-		GetPhysicalDeviceQueueFamilyProperties(physical, &families, nullptr);
-		std::vector<VkQueueFamilyProperties> family_props(families);
-		GetPhysicalDeviceQueueFamilyProperties(physical, &families, family_props.data());
-		for (uint32_t i = 0; i < families; i++) {
-			if ((family_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
-				family = i;
-				break;
-			}
-		}
-		const float             priority = 1.0f;
-		VkDeviceQueueCreateInfo qci {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-		qci.queueFamilyIndex = family;
-		qci.queueCount       = 1;
-		qci.pQueuePriorities = &priority;
-		VkDeviceCreateInfo dci {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-		dci.queueCreateInfoCount    = 1;
-		dci.pQueueCreateInfos       = &qci;
-		dci.enabledExtensionCount   = extension_count;
-		dci.ppEnabledExtensionNames = wanted;
-		if (CreateDevice(physical, &dci, nullptr, &device) != VK_SUCCESS) {
-			return "creating the device failed";
-		}
-		// Device functions through the instance's dispatch work for one device
-		GetDeviceQueue(device, family, 0, &queue);
-		VkCommandPoolCreateInfo pci {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-		pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-		pci.queueFamilyIndex = family;
-		CreateCommandPool(device, &pci, nullptr, &pool);
-		VkCommandBufferAllocateInfo cai {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-		cai.commandPool        = pool;
-		cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		cai.commandBufferCount = 1;
-		AllocateCommandBuffers(device, &cai, &command);
-		return "";
-	}
-
-	uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags flags) const {
-		for (uint32_t i = 0; i < memory.memoryTypeCount; i++) {
-			if ((bits & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & flags) == flags) {
-				return i;
-			}
-		}
-		return 0;
-	}
-
-	void begin() {
-		ResetCommandBuffer(command, 0);
-		VkCommandBufferBeginInfo bi {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-		BeginCommandBuffer(command, &bi);
-	}
-
-	void submit() {
-		EndCommandBuffer(command);
-		VkSubmitInfo si {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-		si.commandBufferCount = 1;
-		si.pCommandBuffers    = &command;
-		QueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-		QueueWaitIdle(queue);
-	}
-
-	void barrier(VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst, uint32_t src_queue = VK_QUEUE_FAMILY_IGNORED,
-	             uint32_t dst_queue = VK_QUEUE_FAMILY_IGNORED) {
-		VkImageMemoryBarrier b {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-		b.srcAccessMask       = src;
-		b.dstAccessMask       = dst;
-		b.oldLayout           = from;
-		b.newLayout           = to;
-		b.srcQueueFamilyIndex = src_queue;
-		b.dstQueueFamilyIndex = dst_queue;
-		b.image               = image;
-		b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-		CmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
-	}
-
-	void close() {
-		if (device != VK_NULL_HANDLE) {
-			DeviceWaitIdle(device);
-			DestroyCommandPool(device, pool, nullptr);
-			DestroyDevice(device, nullptr);
-		}
-		if (instance != VK_NULL_HANDLE) {
-			DestroyInstance(instance, nullptr);
-		}
-		if (lib != nullptr) {
-			::dlclose(lib);
-		}
-	}
-};
 
 constexpr uint32_t SIZE = 64;
 
@@ -221,6 +29,7 @@ struct Owned {
 	VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
+#if !defined(__APPLE__)
 // A linear BGRA8 dma-buf as the shell makes one, cleared to `color`
 Owned shell_buffer(Gpu& gpu, VkClearColorValue color, int& fd, uint32_t& stride) {
 	Owned                                     out;
@@ -274,17 +83,43 @@ Owned shell_buffer(Gpu& gpu, VkClearColorValue color, int& fd, uint32_t& stride)
 	gpu.GetMemoryFdKHR(gpu.device, &get, &fd);
 	return out;
 }
+#else
+// Fills an IOSurface with one BGRA colour, as the shell's renderer would
+void fill(IOSurfaceRef surface, const uint8_t (&bgra)[4]) {
+	IOSurfaceLock(surface, 0, nullptr);
+	auto*        base = static_cast<uint8_t*>(IOSurfaceGetBaseAddress(surface));
+	const size_t row  = IOSurfaceGetBytesPerRow(surface);
+	for (size_t y = 0; y < IOSurfaceGetHeight(surface); y++) {
+		for (size_t x = 0; x < IOSurfaceGetWidth(surface); x++) {
+			std::memcpy(base + y * row + x * 4, bgra, 4);
+		}
+	}
+	IOSurfaceUnlock(surface, 0, nullptr);
+}
+#endif
 
 void run(Gpu& gpu) {
-	// The shell's buffers: 0 is premultiplied red at half alpha, the others clear
-	std::vector<int>   fds(3, -1);
+	// The shell's buffers: 0 is premultiplied red at half alpha, 1 green at half alpha, 2 clear
 	std::vector<Owned> owned;
-	uint32_t           stride = 0;
+#if defined(__APPLE__)
+	FakeShell shell;
+	fill(shell.buffer(0), {0, 0, 128, 128});
+	fill(shell.buffer(1), {0, 128, 0, 128});
+	fill(shell.buffer(2), {0, 0, 0, 0});
+	const std::string offer = shell.offer(SIZE);
+#else
+	std::vector<int> fds(3, -1);
+	uint32_t         stride = 0;
 	for (int i = 0; i < 3; i++) {
-		const VkClearColorValue color = i == 0 ? VkClearColorValue {{0.5f, 0.0f, 0.0f, 0.5f}} : VkClearColorValue {{0, 0, 0, 0}};
+		const VkClearColorValue color = i == 0   ? VkClearColorValue {{0.5f, 0.0f, 0.0f, 0.5f}}
+		                                : i == 1 ? VkClearColorValue {{0.0f, 0.5f, 0.0f, 0.5f}}
+		                                         : VkClearColorValue {{0, 0, 0, 0}};
 		owned.push_back(shell_buffer(gpu, color, fds[static_cast<size_t>(i)], stride));
 	}
-	FakeShell    shell(fds, stride);
+	FakeShell         shell(fds, stride);
+	const std::string offer = R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
+	                          R"(","width":64,"height":64})";
+#endif
 	FakeLauncher launcher;
 
 	lc_callbacks cb {};
@@ -385,18 +220,25 @@ void run(Gpu& gpu) {
 	gpu.BindBufferMemory(gpu.device, readback, readback_memory, 0);
 
 	// The menu opens over the game
-	launcher.send(R"({"type":"overlay_opened"})");
-	launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
-	              R"(","width":64,"height":64})");
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
+	launcher.send(offer);
 	shell.publish(0);
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+	void* mapped = nullptr;
+	gpu.MapMemory(gpu.device, readback_memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+	const auto* px   = static_cast<const uint8_t*>(mapped) + (SIZE / 2 * SIZE + SIZE / 2) * 4;
+	const auto  near = [](int got, int want) { return got >= want - 3 && got <= want + 3; };
+	const auto  is   = [&](int b, int g, int r, int a) { return near(px[0], b) && near(px[1], g) && near(px[2], r) && near(px[3], a); };
+
 	bool     drew      = false;
 	uint64_t completed = 0;
-	for (uint64_t serial = 1; serial <= 20; serial++) {
+	uint64_t serial    = 0;
+	// One present of the game's frame with the menu over it, read back into `px`
+	const auto present = [&]() {
+		serial++;
 		lc_vk_frame frame {};
-		lc_vk_begin(vk, completed, {SIZE, SIZE}, &frame);
+		lc_vk_begin(vk, completed, {SIZE, SIZE}, true, &frame);
 		gpu.begin();
 		// The game's frame: blue
 		gpu.barrier(target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -426,6 +268,9 @@ void run(Gpu& gpu) {
 		gpu.submit();
 		lc_vk_end(vk, serial);
 		completed = serial;
+	};
+	for (int i = 0; i < 20; i++) {
+		present();
 		if (drew && launcher.count("capture_surface") != 0) {
 			break;
 		}
@@ -433,17 +278,54 @@ void run(Gpu& gpu) {
 	}
 	CHECK(drew);
 	CHECK(launcher.wait_for("view").has_value());
+#if defined(__APPLE__)
+	CHECK(shell.wait_capture().has_value());
+	// The capture is the game's frame as it was before the menu went over it: blue
+	if (IOSurfaceRef capture = shell.capture_surface()) {
+		IOSurfaceLock(capture, kIOSurfaceLockReadOnly, nullptr);
+		const auto* base = static_cast<const uint8_t*>(IOSurfaceGetBaseAddress(capture));
+		const auto* cp   = base + IOSurfaceGetBytesPerRow(capture) * (SIZE / 2) + (SIZE / 2) * 4;
+		const int bgra[4] = {cp[0], cp[1], cp[2], cp[3]};
+		IOSurfaceUnlock(capture, kIOSurfaceLockReadOnly, nullptr);
+		if (!(bgra[0] == 255 && bgra[1] == 0 && bgra[2] == 0 && bgra[3] == 255)) {
+			FAIL("captured pixel is BGRA %d %d %d %d, not 255 0 0 255", bgra[0], bgra[1], bgra[2], bgra[3]);
+		}
+	}
+#else
 	CHECK(shell.wait_capture().has_value() && shell.capture_had_fd());
+#endif
 	CHECK(launcher.wait_for("capture_surface").has_value());
 
 	// menu + (1 - menu.a) * game = (0.5, 0, 0, 0.5) + 0.5 * (0, 0, 1, 1), as BGRA bytes
-	void* mapped = nullptr;
-	gpu.MapMemory(gpu.device, readback_memory, 0, VK_WHOLE_SIZE, 0, &mapped);
-	const auto* px   = static_cast<const uint8_t*>(mapped) + (SIZE / 2 * SIZE + SIZE / 2) * 4;
-	const auto  near = [](int got, int want) { return got >= want - 3 && got <= want + 3; };
-	if (!(near(px[0], 128) && near(px[1], 0) && near(px[2], 128) && near(px[3], 255))) {
+	if (!is(128, 0, 128, 255)) {
 		FAIL("drawn pixel is BGRA %d %d %d %d, not about 128 0 128 255", px[0], px[1], px[2], px[3]);
 	}
+
+	// The menu changes: the shell publishes buffer 1, and the next presents draw it, not the
+	// copy of buffer 0 (on macOS, a buffer is copied again whenever the shell publishes it)
+	shell.publish(1);
+	for (int i = 0; i < 20 && !is(128, 128, 0, 255); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		present();
+	}
+	// (0, 0.5, 0, 0.5) + 0.5 * (0, 0, 1, 1)
+	if (!is(128, 128, 0, 255)) {
+		FAIL("after the menu changed, drawn pixel is BGRA %d %d %d %d, not about 128 128 0 255", px[0], px[1], px[2], px[3]);
+	}
+#if defined(__APPLE__)
+	// The shell draws into buffer 0 again, which the helper copied before and has handed back, and
+	// publishes it: the helper has to copy it again, not draw its old red copy (128 0 128 255)
+	fill(shell.buffer(0), {128, 0, 0, 128});
+	shell.publish(0);
+	for (int i = 0; i < 20 && !is(255, 0, 0, 255); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		present();
+	}
+	// (0.5, 0, 0, 0.5) as BGRA + 0.5 * (0, 0, 1, 1) = blue
+	if (!is(255, 0, 0, 255)) {
+		FAIL("after buffer 0 was redrawn, drawn pixel is BGRA %d %d %d %d, not about 255 0 0 255", px[0], px[1], px[2], px[3]);
+	}
+#endif
 
 	gpu.DeviceWaitIdle(gpu.device);
 	lc_vk_destroy(vk);
@@ -465,11 +347,11 @@ void run(Gpu& gpu) {
 
 int main() {
 	Gpu               gpu;
-	const std::string skip = gpu.open();
+	const std::string skip = gpu.open(true);
 	if (!skip.empty()) {
 		std::printf("vk: skipped (%s)\n", skip.c_str());
 		gpu.close();
-		return 0;
+		return SKIPPED;
 	}
 	run(gpu);
 	gpu.close();

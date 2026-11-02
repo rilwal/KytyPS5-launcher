@@ -6,7 +6,11 @@
  * them with the game through a small shared header. When the menu opens, the game copies the frame
  * it paused on into a surface of its own and hands it back, as the menu's background.
  *
- * The library does the protocol: it takes overlay_surface and overlay_visible off the session,
+ * The game draws whatever the shell has drawn into the surfaces, over every frame: the menu, a
+ * keyboard, notices. Nothing before the shell's first frame, nor once the surfaces are taken away.
+ * Pausing (lc_callbacks.pause) and passing input on (lc_overlay_wants_input) are separate.
+ *
+ * The library does the protocol: it takes overlay_surface and overlay off the session,
  * fetches the surfaces from the shell's service, runs the header's buffer trade, sends view, and
  * hands the capture over once the shell's surfaces are in use. The emulator only imports the
  * surfaces into its renderer, draws the buffer it's told to, and copies a frame when asked.
@@ -18,6 +22,11 @@
  * The lc_overlay_* calls below are for the present thread (one thread, or calls serialised by the
  * caller), apart from lc_overlay_get.
  *
+ * With LC_CAP_DRAW_LISTS the shell sends draw lists instead (launcher_list.h): the menu as the
+ * shell's renderer would draw it, which the emulator draws itself over its live frame, so there's
+ * no capture and nothing to import. The same header trades three slots of shared memory, and the
+ * library copies each list out of its slot, checks it, and hands it over (lc_frame.list).
+ *
  * Linux shares dma-bufs (and the header as a memfd); macOS, IOSurfaces. Elsewhere, and on a
  * platform whose backend isn't in yet, lc_overlay_get returns NULL and the shell's own window
  * comes to the front instead, as for any game.
@@ -26,6 +35,7 @@
 #define LAUNCHER_OVERLAY_H
 
 #include "launcher_client.h"
+#include "launcher_list.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +84,16 @@ typedef struct lc_frame {
 
 	/* Copy this present's frame for the shell, then lc_overlay_capture (or cancel with NULL). */
 	bool capture;
+
+	/* With LC_CAP_DRAW_LISTS, in place of all the above but `generation`: the menu to draw over
+	   this present (launcher_list.h), or NULL for none. It stays valid until the next
+	   lc_overlay_begin. `list_fresh` says it's new this present: apply its glyph updates and image
+	   ops then, even if it isn't drawn, since each list carries only what changed since the one
+	   before. A change can come again (applying it again in order changes nothing), and
+	   lc_overlay_begin called again in the same present hands the same list over, still fresh.
+	   A new `generation` starts over: drop the glyph atlas and every image first. */
+	const lc_list *list;
+	bool           list_fresh;
 } lc_frame;
 
 /* Starts a present. `completed` is the newest serial the GPU has finished. It can be called again
@@ -110,6 +130,57 @@ void lc_overlay_capture(lc_overlay *overlay, const lc_capture *capture, uint64_t
 /* Whether presents are needed though the game sends no frames (paused, or loading): to show the
    overlay, finish a capture, or catch up with a change. Any thread. */
 bool lc_overlay_wants_presents(lc_overlay *overlay);
+
+/* Keyboard and mouse input from the game's window, for the shell while its menu or a keyboard is
+   shown in the game's frames: the game's window keeps the focus, so the game passes them on.
+   Send every key as LC_INPUT_KEY, and what a key typed as LC_INPUT_TEXT as well: keys that type
+   (letters, digits, Space) act only through their text, so without it they do nothing. With
+   SDL3, that means SDL_StartTextInput while lc_overlay_wants_input. Send no text for a key
+   pressed with Ctrl (Command on a Mac): it's a shortcut. */
+typedef enum lc_input_kind {
+	LC_INPUT_KEY     = 0, /* A key went down or up */
+	LC_INPUT_TEXT    = 1, /* Text the keys typed, after the layout and any input method */
+	LC_INPUT_POINTER = 2, /* The pointer moved */
+	LC_INPUT_BUTTON  = 3, /* A mouse button went down or up */
+	LC_INPUT_WHEEL   = 4, /* The wheel or a trackpad scrolled */
+} lc_input_kind;
+
+#define LC_MOD_SHIFT 1u
+#define LC_MOD_CTRL  2u
+#define LC_MOD_ALT   4u
+#define LC_MOD_SUPER 8u /* Command on a Mac, the Windows key elsewhere */
+
+typedef struct lc_input {
+	lc_input_kind kind;
+	/* KEY: the W3C KeyboardEvent.key value: "ArrowUp", "Enter", "Escape", "Backspace", "Tab",
+	   "F1", " ", or the character the key makes ("a") */
+	const char *key;
+	/* TEXT, UTF-8 */
+	const char *text;
+	/* KEY, BUTTON */
+	bool down;
+	/* KEY: held down, repeating */
+	bool repeat;
+	/* KEY: LC_MOD_* */
+	uint32_t mods;
+	/* POINTER: where in the window, 0 to 1 of its width and height from the top left.
+	   WHEEL: how far, in lines (or pixels if `pixels`); positive y scrolls up. */
+	float x;
+	float y;
+	/* WHEEL: x and y are pixels, from a trackpad */
+	bool pixels;
+	/* BUTTON: 0 left, 1 right, 2 middle, 3 back, 4 forward */
+	uint32_t button;
+} lc_input;
+
+/* Whether keys and the mouse in the game's window are the shell's now: its menu or one of its
+   keyboards is shown in the game's frames (not just its notices, which leave them to the game).
+   While it is, pass them on with lc_overlay_input and don't act on them in the game. Any
+   thread. */
+bool lc_overlay_wants_input(lc_overlay *overlay);
+
+/* Passes one on to the shell; dropped unless lc_overlay_wants_input. Any thread. */
+void lc_overlay_input(lc_overlay *overlay, const lc_input *input);
 
 /* A surface's id, size and memory layout, for importing it. */
 uint32_t lc_surface_id(const lc_surface *surface);

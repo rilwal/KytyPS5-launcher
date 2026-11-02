@@ -139,6 +139,62 @@ static void sent() {
 	check_sent(protocol::view(3600, 2338));
 	check_sent(protocol::capture_surface(20, 3600, 2338));
 
+	const char*   languages[] = {"en", "ja"};
+	lc_osk_params osk {};
+	osk.kind           = LC_OSK_TEXT;
+	osk.title          = "Name your save";
+	osk.placeholder    = "Hero";
+	osk.text           = "Ann";
+	osk.cursor         = 3;
+	osk.max_length     = 16;
+	osk.languages      = languages;
+	osk.language_count = 2;
+	osk.has_anchor     = true;
+	osk.x              = 0.5f;
+	osk.y              = 0.95f;
+	osk.align_x        = LC_OSK_ALIGN_CENTER;
+	osk.align_y        = LC_OSK_ALIGN_END;
+	check_sent(protocol::osk_open(1, osk));
+	{
+		const auto   built  = lc::json::parse(protocol::osk_open(1, osk).json);
+		const Value* anchor = built ? built->find("anchor") : nullptr;
+		CHECK(anchor && anchor->find("x")->as_uint() == 500 && anchor->find("y")->as_uint() == 950);
+	}
+	// A bare one leaves out what it doesn't set
+	lc_osk_params empty {};
+	check_sent(protocol::osk_open(2, empty), {"title", "placeholder", "max_length", "languages", "anchor"});
+	check_sent(protocol::osk_text(1, 4, "Anné", 4));
+	check_sent(protocol::osk_closed(1, LC_OSK_ACCEPTED));
+	lc_input arrow {};
+	arrow.kind = LC_INPUT_KEY;
+	arrow.key  = "ArrowUp";
+	arrow.down = true;
+	arrow.mods = LC_MOD_SHIFT;
+	check_sent(protocol::overlay_input(arrow));
+	{
+		// The rest of the kinds, as the launcher reads them
+		const auto input = [](const lc_input& in) {
+			const auto built = lc::json::parse(protocol::overlay_input(in).json);
+			return built ? std::optional<Value>(*built->find("input")) : std::nullopt;
+		};
+		lc_input text {};
+		text.kind = LC_INPUT_TEXT;
+		text.text = "é";
+		CHECK(input(text)->text("kind") == "text" && input(text)->text("text") == "é");
+		lc_input wheel {};
+		wheel.kind = LC_INPUT_WHEEL;
+		wheel.y    = -1.5f;
+		CHECK(input(wheel)->find("y")->as_int() == -150 && !input(wheel)->find("pixels")->as_bool());
+		lc_input button {};
+		button.kind   = LC_INPUT_BUTTON;
+		button.button = 1;
+		button.down   = true;
+		CHECK(input(button)->find("button")->as_uint() == 1 && input(button)->find("down")->as_bool());
+		// Nothing to say
+		lc_input nameless {};
+		CHECK(protocol::overlay_input(nameless).type.empty());
+	}
+
 	// A plugin runner's
 	lc_game portal {};
 	portal.external_id = "620";
@@ -283,10 +339,13 @@ static void read() {
 	}
 	if (const auto msg = host("overlay_surface")) {
 		CHECK(msg->buffers == std::vector<uint32_t>({11, 12, 13}));
-		CHECK(msg->header == 10 && !msg->service.empty() && msg->width == 1920 && msg->height == 1080);
+		CHECK(msg->header == 10 && !msg->service.empty() && msg->width == 1920 && msg->height == 1080 && !msg->lists);
+		auto lists = *load("host", "overlay_surface");
+		lists.set("lists", true);
+		CHECK(protocol::parse_host(lists.dump()).lists);
 	}
-	if (const auto msg = host("overlay_visible")) {
-		CHECK(msg->visible);
+	if (const auto msg = host("overlay")) {
+		CHECK(msg->pause && msg->input);
 	}
 	if (const auto msg = host("launch")) {
 		CHECK(msg->launch == 3 && msg->game == 7 && msg->external_id == "620");
@@ -295,7 +354,28 @@ static void read() {
 	if (const auto msg = host("list_achievements")) {
 		CHECK(msg->game == 7 && msg->external_id == "620" && msg->game_dir == "/games/steamapps/common/Portal 2");
 	}
-	for (const char* type: {"quit", "overlay_opened", "overlay_closed", "scan"}) {
+	if (const auto msg = host("osk_available")) {
+		CHECK(msg->available);
+	}
+	if (const auto msg = host("osk_edit")) {
+		CHECK(msg->osk == 1 && msg->seq == 4 && msg->edit_ok && msg->edit_op == LC_OSK_INSERT && msg->edit_text == "\u00e9");
+	}
+	if (const auto msg = host("osk_finish")) {
+		CHECK(msg->osk == 1 && msg->accepted);
+	}
+	// Every edit the launcher sends, and one from a newer one
+	const auto edit = [](const char* json) {
+		return protocol::parse_host(std::string(R"({"type":"osk_edit","osk":2,"seq":9,"edit":)") + json + "}");
+	};
+	CHECK(edit(R"({"op":"backspace"})").edit_op == LC_OSK_BACKSPACE);
+	CHECK(edit(R"({"op":"delete"})").edit_op == LC_OSK_DELETE);
+	const auto left = edit(R"({"op":"move","by":-3})");
+	CHECK(left.edit_ok && left.edit_op == LC_OSK_MOVE && left.edit_by == -3);
+	const auto replace = edit(R"({"op":"replace","text":"\u65e5\u672c","cursor":2})");
+	CHECK(replace.edit_ok && replace.edit_op == LC_OSK_REPLACE && replace.edit_text == "\u65e5\u672c" && replace.edit_cursor == 2);
+	CHECK(!edit(R"({"op":"select_all"})").edit_ok);
+	CHECK(!edit(R"({"op":"move","by":"x"})").edit_ok);
+	for (const char* type: {"quit", "scan"}) {
 		if (const auto msg = host(type)) {
 			CHECK(msg->type == type);
 		}

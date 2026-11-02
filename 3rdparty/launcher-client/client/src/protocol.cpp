@@ -38,6 +38,8 @@ Message hello(const std::string& token, int api, uint32_t capabilities, const st
 	    {LC_CAP_LAUNCH, "launch"},
 	    {LC_CAP_ACHIEVEMENTS, "achievements"},
 	    {LC_CAP_SETTINGS, "settings"},
+	    {LC_CAP_OSK, "osk"},
+	    {LC_CAP_DRAW_LISTS, "draw_lists"},
 	};
 	for (const auto& [flag, cap]: names) {
 		if ((capabilities & flag) != 0) {
@@ -276,6 +278,155 @@ Message capture_surface(uint32_t id, uint32_t width, uint32_t height) {
 	return make("capture_surface", std::move(obj));
 }
 
+static const char* osk_kind(lc_osk_kind kind) {
+	switch (kind) {
+		case LC_OSK_LATIN: return "latin";
+		case LC_OSK_URL: return "url";
+		case LC_OSK_EMAIL: return "email";
+		case LC_OSK_NUMBER: return "number";
+		default: return "text";
+	}
+}
+
+static const char* osk_enter(lc_osk_enter enter) {
+	switch (enter) {
+		case LC_OSK_ENTER_SEND: return "send";
+		case LC_OSK_ENTER_SEARCH: return "search";
+		case LC_OSK_ENTER_GO: return "go";
+		default: return "default";
+	}
+}
+
+static const char* osk_align(lc_osk_align align) {
+	switch (align) {
+		case LC_OSK_ALIGN_CENTER: return "center";
+		case LC_OSK_ALIGN_END: return "end";
+		default: return "start";
+	}
+}
+
+// 0 to 1 as thousandths
+static uint32_t permille(float f) {
+	if (!(f > 0.0f)) {
+		return 0;
+	}
+	return f >= 1.0f ? 1000u : static_cast<uint32_t>(f * 1000.0f + 0.5f);
+}
+
+Message osk_open(uint32_t osk, const lc_osk_params& p) {
+	Value obj = typed("osk_open");
+	obj.set("osk", osk);
+	obj.set("kind", osk_kind(p.kind));
+	if (p.title != nullptr && *p.title != '\0') {
+		obj.set("title", p.title);
+	}
+	if (p.placeholder != nullptr && *p.placeholder != '\0') {
+		obj.set("placeholder", p.placeholder);
+	}
+	obj.set("text", str(p.text));
+	obj.set("cursor", p.cursor);
+	if (p.max_length != 0) {
+		obj.set("max_length", p.max_length);
+	}
+	obj.set("multiline", p.multiline);
+	obj.set("password", p.password);
+	obj.set("enter", osk_enter(p.enter));
+	if (p.language_count != 0 && p.languages != nullptr) {
+		Value languages = Value::array();
+		for (size_t i = 0; i < p.language_count; i++) {
+			if (p.languages[i] != nullptr && *p.languages[i] != '\0') {
+				languages.push(p.languages[i]);
+			}
+		}
+		obj.set("languages", std::move(languages));
+	}
+	if (p.has_anchor) {
+		Value anchor = Value::object();
+		anchor.set("x", permille(p.x));
+		anchor.set("y", permille(p.y));
+		anchor.set("align_x", osk_align(p.align_x));
+		anchor.set("align_y", osk_align(p.align_y));
+		obj.set("anchor", std::move(anchor));
+	}
+	return make("osk_open", std::move(obj));
+}
+
+Message osk_text(uint32_t osk, uint64_t seq, const char* text, uint32_t cursor) {
+	Value obj = typed("osk_text");
+	obj.set("osk", osk);
+	obj.set("seq", seq);
+	obj.set("text", str(text));
+	obj.set("cursor", cursor);
+	return make("osk_text", std::move(obj));
+}
+
+Message osk_closed(uint32_t osk, lc_osk_result result) {
+	Value obj = typed("osk_closed");
+	obj.set("osk", osk);
+	obj.set("result", result == LC_OSK_ACCEPTED ? "accepted" : result == LC_OSK_CANCELLED ? "cancelled" : "aborted");
+	return make("osk_closed", std::move(obj));
+}
+
+// 0 to 1 as ten-thousandths
+static uint32_t ten_thousandths(float f) {
+	if (!(f > 0.0f)) {
+		return 0;
+	}
+	return f >= 1.0f ? 10000u : static_cast<uint32_t>(f * 10000.0f + 0.5f);
+}
+
+// Hundredths, rounded, and clamped to what the launcher reads
+static int64_t hundredths(float f) {
+	const float h = f * 100.0f;
+	if (!(h > -2.0e9f && h < 2.0e9f)) {
+		return 0;
+	}
+	return static_cast<int64_t>(h < 0.0f ? h - 0.5f : h + 0.5f);
+}
+
+Message overlay_input(const lc_input& in) {
+	Value input = Value::object();
+	switch (in.kind) {
+		case LC_INPUT_KEY:
+			if (in.key == nullptr || in.key[0] == '\0') {
+				return {};
+			}
+			input.set("kind", "key");
+			input.set("key", in.key);
+			input.set("down", in.down);
+			input.set("repeat", in.repeat);
+			input.set("mods", in.mods & (LC_MOD_SHIFT | LC_MOD_CTRL | LC_MOD_ALT | LC_MOD_SUPER));
+			break;
+		case LC_INPUT_TEXT:
+			if (in.text == nullptr || in.text[0] == '\0') {
+				return {};
+			}
+			input.set("kind", "text");
+			input.set("text", str(in.text));
+			break;
+		case LC_INPUT_POINTER:
+			input.set("kind", "pointer");
+			input.set("x", ten_thousandths(in.x));
+			input.set("y", ten_thousandths(in.y));
+			break;
+		case LC_INPUT_BUTTON:
+			input.set("kind", "button");
+			input.set("button", std::min<uint32_t>(in.button, 255));
+			input.set("down", in.down);
+			break;
+		case LC_INPUT_WHEEL:
+			input.set("kind", "wheel");
+			input.set("x", hundredths(in.x));
+			input.set("y", hundredths(in.y));
+			input.set("pixels", in.pixels);
+			break;
+		default: return {};
+	}
+	Value obj = typed("overlay_input");
+	obj.set("input", std::move(input));
+	return make("overlay_input", std::move(obj));
+}
+
 static Value game(const lc_game& g) {
 	Value art = Value::object();
 	art.set("cover", text_or_null(g.art.cover));
@@ -470,8 +621,43 @@ HostMessage parse_host(const std::string& frame) {
 			}
 		}
 	}
-	if (const Value* v = obj.find("visible"); v != nullptr && v->is_bool()) {
-		msg.visible = v->as_bool();
+	if (const Value* v = obj.find("lists"); v != nullptr && v->is_bool()) {
+		msg.lists = v->as_bool();
+	}
+	if (const Value* v = obj.find("pause"); v != nullptr && v->is_bool()) {
+		msg.pause = v->as_bool();
+	}
+	if (const Value* v = obj.find("input"); v != nullptr && v->is_bool()) {
+		msg.input = v->as_bool();
+	}
+	if (const Value* v = obj.find("available"); v != nullptr && v->is_bool()) {
+		msg.available = v->as_bool();
+	}
+	if (const Value* v = obj.find("accepted"); v != nullptr && v->is_bool()) {
+		msg.accepted = v->as_bool();
+	}
+	msg.osk = read_u32(obj, "osk");
+	msg.seq = read_u64(obj, "seq");
+	if (const Value* edit = obj.find("edit"); edit != nullptr && edit->is_object()) {
+		const std::string op = edit->text("op");
+		msg.edit_text        = edit->text("text");
+		msg.edit_ok          = true;
+		if (op == "insert") {
+			msg.edit_op = LC_OSK_INSERT;
+		} else if (op == "backspace") {
+			msg.edit_op = LC_OSK_BACKSPACE;
+		} else if (op == "delete") {
+			msg.edit_op = LC_OSK_DELETE;
+		} else if (const Value* by = edit->find("by"); op == "move" && by != nullptr && by->is_integer() &&
+		                                               by->as_int() >= INT32_MIN && by->as_int() <= INT32_MAX) {
+			msg.edit_op = LC_OSK_MOVE;
+			msg.edit_by = static_cast<int32_t>(by->as_int());
+		} else if (op == "replace") {
+			msg.edit_op     = LC_OSK_REPLACE;
+			msg.edit_cursor = read_u32(*edit, "cursor");
+		} else {
+			msg.edit_ok = false;
+		}
 	}
 	if (const Value* v = obj.find("value"); v != nullptr) {
 		msg.value = value_text(*v);

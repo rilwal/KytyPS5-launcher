@@ -260,8 +260,8 @@ HostMessage ParseHost(std::string_view frame) {
 			}
 		}
 	}
-	if (const auto it = obj.find("visible"); it != obj.end() && it->is_boolean()) {
-		msg.visible = it->get<bool>();
+	if (const auto it = obj.find("pause"); it != obj.end() && it->is_boolean()) {
+		msg.pause = it->get<bool>();
 	}
 	if (const auto it = obj.find("available"); it != obj.end() && it->is_boolean()) {
 		msg.available = it->get<bool>();
@@ -443,7 +443,7 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 
 	if (const auto msg = host("accepted")) {
 		// The API Kyty speaks (session.cpp)
-		expect("accepted", msg->api == 4 && msg->title == "Demon's Souls");
+		expect("accepted", msg->api == 6 && msg->title == "Demon's Souls");
 	}
 	if (const auto msg = host("setting")) {
 		expect("setting", msg->key == "api_key" && msg->value == "0123456789ABCDEF");
@@ -460,8 +460,8 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 		                              msg->header == 10 && !msg->service.empty() &&
 		                              msg->width == 1920 && msg->height == 1080);
 	}
-	if (const auto msg = host("overlay_visible")) {
-		expect("overlay_visible", msg->visible);
+	if (const auto msg = host("overlay")) {
+		expect("overlay", msg->pause);
 	}
 	if (const auto msg = host("osk_available")) {
 		expect("osk_available", msg->available);
@@ -473,7 +473,7 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 		expect("osk_finish", msg->osk != 0 && msg->accepted);
 	}
 	// Only their type is read
-	for (std::string_view type: {"quit", "overlay_opened", "overlay_closed"}) {
+	for (std::string_view type: {"quit"}) {
 		host(type);
 	}
 

@@ -31,9 +31,9 @@ namespace LauncherOverlay {
 using Common::Launcher::OverlayPorts::DmaBuf;
 
 // Any thread. Takes the surfaces over; no buffers removes the overlay.
+// Whatever the shell draws into them is drawn over every present, from its first frame on.
 void SetSurfaces(std::vector<std::unique_ptr<DmaBuf>> buffers, std::unique_ptr<DmaBuf> header,
                  uint32_t width, uint32_t height);
-void SetVisible(bool visible);
 
 // Copies the next presented game frame for the shell. Any thread.
 void RequestCapture();

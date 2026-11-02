@@ -11,7 +11,7 @@ private and this fork is public. Once the launcher is public, this goes back
 to being a submodule. Don't edit it here: change it in the
 launcher, then copy it again.
 
-Copied from: f1f05807f50b8c6005717c665b2d26623d86c2a2 (2026-10-31)
+Copied from: 4cc649425198dc06b7e75a13d5870639442d1616 (2026-11-02)
 
 To update, from a checkout of the launcher:
 
