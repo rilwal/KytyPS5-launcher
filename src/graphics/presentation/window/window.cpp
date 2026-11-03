@@ -869,10 +869,6 @@ void WindowRequestQuit() {
 void WindowSetLauncherPaused(bool paused) {
 	LOGF("Launcher pause: %s\n", paused ? "true" : "false");
 	g_launcher_paused.store(paused, std::memory_order_release);
-	// Wake the window loop, if it runs, so its timer follows at once.
-	SDL_Event event {};
-	event.type = SDL_EVENT_USER;
-	SDL_PushEvent(&event);
 }
 
 void WindowFollowConfig(uint32_t changes) {
