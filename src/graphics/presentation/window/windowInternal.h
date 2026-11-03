@@ -30,15 +30,13 @@ struct SurfaceCapabilities {
 [[nodiscard]] bool LauncherQuitRequested() noexcept;
 
 struct WindowLoopState {
-	SDL_Event        event {};
-	bool             need_exit = false;
-	std::atomic_bool paused    = false;
-	bool             launcher_ready_sent = false;
+	SDL_Event             event {};
+	bool                  need_exit = false;
+	bool                  launcher_ready_sent = false;
 	std::atomic<uint64_t> presented_frames {0};
 
-	[[nodiscard]] bool IsPaused() const noexcept {
-		return paused.load(std::memory_order_acquire) || LauncherPaused();
-	}
+	// Only the launcher pauses the game now; upstream dropped the OS background pause.
+	[[nodiscard]] bool IsPaused() const noexcept { return LauncherPaused(); }
 };
 
 struct WindowContext {
