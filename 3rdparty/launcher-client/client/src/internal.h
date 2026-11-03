@@ -57,11 +57,18 @@ struct lc_session {
 	void activity_done(const char* id);
 	bool wait_configure(std::chrono::milliseconds timeout, const lc_kv** values, size_t* count);
 
+	// The on-screen keyboard (lc_osk_*): one open at a time, by number
+	bool     osk_available();
+	uint32_t osk_open(const lc_osk_params& params);
+	void     osk_text(uint32_t osk, uint64_t seq, const char* text, uint32_t cursor);
+	void     osk_close(uint32_t osk, lc_osk_result result);
+
 	void log(lc_log_level level, const char* format, ...) LC_PRINTF(3, 4);
 
 	lc_callbacks                 callbacks {};
 	lc_runner_callbacks          runner {}; // A plugin runner's (launcher_runner.h)
 	lc_overlay*                  overlay = nullptr;
+	bool                         paused_for_menu = false; // The last overlay message's pause, on the reader thread
 
 	// From accepted
 	std::mutex  accepted_mutex;
@@ -77,6 +84,8 @@ private:
 	void reader();
 	void writer();
 	void dispatch(const std::string& frame);
+	void osk_set_available(bool available, bool notify = true);
+	bool osk_is_open(uint32_t osk);
 
 #ifdef _WIN32
 	void* m_pipe = nullptr; // The pipe's HANDLE, opened for overlapped I/O
@@ -117,18 +126,32 @@ private:
 	std::mutex                                   m_view_mutex;
 	std::optional<std::pair<uint32_t, uint32_t>> m_view;
 	bool                                         m_ready_sent = false;
+
+	std::mutex m_osk_mutex;
+	bool       m_osk_available = false;
+	uint32_t   m_osk_open      = 0; // The keyboard open on the shell, 0 for none
+	uint32_t   m_osk_next      = 0;
 };
 
 namespace lc {
 
 // The composited overlay (overlay.cpp). The session hands it the overlay messages on its reader
 // thread; the present thread calls the lc_overlay_* functions.
-lc_overlay* overlay_create(lc_session& session);
+// `lists`: the session draws the menu from draw lists (LC_CAP_DRAW_LISTS)
+lc_overlay* overlay_create(lc_session& session, bool lists);
 void        overlay_destroy(lc_overlay* overlay);
 void        overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg);
-void        overlay_on_visible(lc_overlay* overlay, bool visible);
-void        overlay_on_menu(lc_overlay* overlay, bool opened);
+// The quick menu opened or closed (only when that changes)
+void        overlay_on_pause(lc_overlay* overlay, bool pause);
+void        overlay_on_input(lc_overlay* overlay, bool input);
 lc_session* overlay_session(lc_overlay* overlay);
+// Whether it draws the menu from draw lists (LC_CAP_DRAW_LISTS), not the shell's buffers
+bool overlay_draws_lists(lc_overlay* overlay);
+// The emulator can't draw the lists it's handed: the shell comes to the front instead
+void overlay_lists_failed(lc_overlay* overlay);
+// The GPU time the game's drawing of the menu took, in milliseconds, for the shell's frame timings:
+// written into the header (transport::HeaderMap). On the presenting thread.
+void overlay_gpu_times(lc_overlay* overlay, float render, float glass, float draw, float composite);
 // Stops its thread and lets the service go, before the session closes its connection.
 void overlay_stop(lc_overlay* overlay);
 

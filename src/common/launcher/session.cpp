@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <utility>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h>
@@ -25,7 +26,7 @@ static constexpr const char* ENV_SESSION  = "LAUNCHER_SESSION";
 
 // The plugin API version Kyty speaks. It uses unlocked.at and messages newer than API 1, and the
 // on-screen keyboard (osk) from API 4.
-static constexpr int PLUGIN_API = 4;
+static constexpr int PLUGIN_API = 6;
 
 // Minimum time between two updates of one activity.
 static constexpr auto ACTIVITY_INTERVAL = std::chrono::milliseconds(100);
@@ -387,17 +388,14 @@ void Session::Dispatch(const std::string& frame) {
 		if (m_handlers.quit) {
 			m_handlers.quit();
 		}
-	} else if (msg.type == "overlay_opened" || msg.type == "overlay_closed") {
-		if (m_handlers.overlay) {
-			m_handlers.overlay(msg.type == "overlay_opened");
+	} else if (msg.type == "overlay") {
+		// Kyty passes no keys or mouse on, so only the pause matters
+		if (std::exchange(m_paused_for_menu, msg.pause) != msg.pause && m_handlers.overlay) {
+			m_handlers.overlay(msg.pause);
 		}
 	} else if (msg.type == "overlay_surface") {
 		if (m_handlers.overlay_surface) {
 			m_handlers.overlay_surface(msg);
-		}
-	} else if (msg.type == "overlay_visible") {
-		if (m_handlers.overlay_visible) {
-			m_handlers.overlay_visible(msg.visible);
 		}
 	} else if (msg.type == "invoke") {
 		if (m_handlers.invoke) {

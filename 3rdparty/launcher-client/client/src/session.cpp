@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -256,7 +257,7 @@ bool lc_session::connect(const lc_connect_info& info, std::string& error) {
 	}
 
 	if (!runner && (capabilities & LC_CAP_COMPOSITED_OVERLAY) != 0) {
-		overlay = overlay_create(*this);
+		overlay = overlay_create(*this, (capabilities & LC_CAP_DRAW_LISTS) != 0);
 	}
 	log(LC_LOG_INFO, "connected to %s at %s", welcome.server.c_str(), endpoint.c_str());
 	return true;
@@ -428,21 +429,38 @@ void lc_session::dispatch(const std::string& frame) {
 		if (cb.quit != nullptr) {
 			cb.quit(cb.user);
 		}
-	} else if (msg.type == "overlay_opened" || msg.type == "overlay_closed") {
-		const bool opened = msg.type == "overlay_opened";
+	} else if (msg.type == "overlay") {
 		if (overlay != nullptr) {
-			overlay_on_menu(overlay, opened);
+			overlay_on_input(overlay, msg.input);
 		}
-		if (cb.overlay != nullptr) {
-			cb.overlay(cb.user, opened);
+		if (std::exchange(paused_for_menu, msg.pause) != msg.pause) {
+			if (overlay != nullptr) {
+				overlay_on_pause(overlay, msg.pause);
+			}
+			if (cb.pause != nullptr) {
+				cb.pause(cb.user, msg.pause);
+			}
 		}
 	} else if (msg.type == "overlay_surface") {
 		if (overlay != nullptr) {
 			overlay_on_surfaces(overlay, msg);
 		}
-	} else if (msg.type == "overlay_visible") {
-		if (overlay != nullptr) {
-			overlay_on_visible(overlay, msg.visible);
+	} else if (msg.type == "osk_available") {
+		osk_set_available(msg.available);
+	} else if (msg.type == "osk_edit") {
+		if (!msg.edit_ok) {
+			log(LC_LOG_ERROR, "osk_edit: an edit it doesn't know; ignored");
+		} else if (osk_is_open(msg.osk) && cb.osk_edit != nullptr) {
+			lc_osk_edit edit {};
+			edit.op     = msg.edit_op;
+			edit.text   = msg.edit_text.c_str();
+			edit.by     = msg.edit_by;
+			edit.cursor = msg.edit_cursor;
+			cb.osk_edit(cb.user, msg.osk, msg.seq, &edit);
+		}
+	} else if (msg.type == "osk_finish") {
+		if (osk_is_open(msg.osk) && cb.osk_finish != nullptr) {
+			cb.osk_finish(cb.user, msg.osk, msg.accepted);
 		}
 	} else if (msg.type == "invoke") {
 		if (cb.invoke != nullptr) {
@@ -479,6 +497,78 @@ void lc_session::dispatch(const std::string& frame) {
 	// Anything newer is only logged
 }
 
+void lc_session::osk_set_available(bool available, bool notify) {
+	{
+		std::lock_guard lock(m_osk_mutex);
+		if (m_osk_available == available) {
+			return;
+		}
+		m_osk_available = available;
+		if (!available && m_osk_open != 0) {
+			// The emulator shows its own for one that was open (lc_callbacks.osk_available). launcherd
+			// is told it's gone, for an open that crossed the offer ending and came after a new one
+			send(protocol::osk_closed(m_osk_open, LC_OSK_ABORTED));
+			m_osk_open = 0;
+		}
+	}
+	log(LC_LOG_INFO, "on-screen keyboard %s", available ? "available" : "not available");
+	if (notify && callbacks.osk_available != nullptr) {
+		callbacks.osk_available(callbacks.user, available);
+	}
+}
+
+bool lc_session::osk_is_open(uint32_t osk) {
+	std::lock_guard lock(m_osk_mutex);
+	return osk != 0 && m_osk_open == osk;
+}
+
+bool lc_session::osk_available() {
+	std::lock_guard lock(m_osk_mutex);
+	return m_osk_available;
+}
+
+uint32_t lc_session::osk_open(const lc_osk_params& params) {
+	uint32_t closed = 0;
+	uint32_t id     = 0;
+	{
+		std::lock_guard lock(m_osk_mutex);
+		if (!m_osk_available) {
+			return 0;
+		}
+		closed = m_osk_open;
+		if (++m_osk_next == 0) {
+			m_osk_next = 1;
+		}
+		id         = m_osk_next;
+		m_osk_open = id;
+		// Queued under the lock, so a close of the last one goes out before this opens
+		if (closed != 0) {
+			send(protocol::osk_closed(closed, LC_OSK_ABORTED));
+		}
+		send(protocol::osk_open(id, params));
+	}
+	return id;
+}
+
+void lc_session::osk_close(uint32_t osk, lc_osk_result result) {
+	{
+		std::lock_guard lock(m_osk_mutex);
+		if (osk == 0 || m_osk_open != osk) {
+			// Already closed, or given back with osk_available
+			return;
+		}
+		m_osk_open = 0;
+		send(protocol::osk_closed(osk, result));
+	}
+}
+
+void lc_session::osk_text(uint32_t osk, uint64_t seq, const char* text, uint32_t cursor) {
+	std::lock_guard lock(m_osk_mutex);
+	if (osk != 0 && m_osk_open == osk) {
+		send(protocol::osk_text(osk, seq, text, cursor));
+	}
+}
+
 void lc_session::reader() {
 	std::string frame;
 	while (read_frame(frame)) {
@@ -489,6 +579,8 @@ void lc_session::reader() {
 		std::lock_guard lock(m_queue_mutex);
 		closing = m_stop;
 	}
+	// No shell draws its keyboards now; told only if the emulator didn't close the session itself
+	osk_set_available(false, !closing);
 	if (!closing) {
 		log(LC_LOG_INFO, "connection closed");
 		if (callbacks.closed != nullptr) {
@@ -806,6 +898,26 @@ void lc_achievement_progress(lc_session* session, const char* id, uint32_t curre
 void lc_overlay_items(lc_session* session, const lc_setting* items, size_t count) {
 	if (session != nullptr) {
 		session->send(protocol::overlay_items(items, count));
+	}
+}
+
+bool lc_osk_available(lc_session* session) {
+	return session != nullptr && session->osk_available();
+}
+
+uint32_t lc_osk_open(lc_session* session, const lc_osk_params* params) {
+	return session != nullptr && params != nullptr ? session->osk_open(*params) : 0;
+}
+
+void lc_osk_text(lc_session* session, uint32_t osk, uint64_t seq, const char* text, uint32_t cursor) {
+	if (session != nullptr) {
+		session->osk_text(osk, seq, text, cursor);
+	}
+}
+
+void lc_osk_close(lc_session* session, uint32_t osk, lc_osk_result result) {
+	if (session != nullptr) {
+		session->osk_close(osk, result);
 	}
 }
 

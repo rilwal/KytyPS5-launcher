@@ -121,7 +121,7 @@ struct HostMessage {
 	std::string                service;         // overlay_surface: where to get them
 	uint32_t                   width   = 0;     // overlay_surface
 	uint32_t                   height  = 0;     // overlay_surface
-	bool                       visible = false; // overlay_visible
+	bool                       pause   = false; // overlay: the quick menu is open
 	bool                       available = false; // osk_available
 	uint32_t                   osk       = 0;     // osk_edit, osk_finish
 	uint64_t                   seq       = 0;     // osk_edit

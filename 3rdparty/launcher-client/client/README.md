@@ -7,11 +7,13 @@ It has three layers, and an emulator can stop at any of them:
 | Header | What it does | Platforms |
 | --- | --- | --- |
 | `launcher_client.h` | The session: connects from `LAUNCHER_ENDPOINT` and `LAUNCHER_SESSION`, does the hello, and sends every session message from a writer thread of its own (so no emulator thread waits on the launcher). It waits for `configure` and hands what the launcher asks for to callbacks. | Linux, macOS, Windows |
-| `launcher_overlay.h` | The composited overlay, without any graphics API. It fetches the shell's surfaces from its service, runs the header's buffer trade (a buffer goes back only once the GPU is done with it), sends `view`, and hands the capture over once the surfaces are in use. The emulator imports the surfaces, draws the buffer it's told to, and copies a frame when asked. | Linux (dma-bufs), macOS (IOSurfaces) |
+| `launcher_overlay.h` | The composited overlay, without any graphics API. It fetches the shell's surfaces from its service, runs the header's buffer trade (a buffer goes back only once the GPU is done with it), sends `view`, and hands the capture over once the surfaces are in use. The emulator imports the surfaces, draws the buffer it's told to, and copies a frame when asked. With `LC_CAP_DRAW_LISTS`, it hands over the shell's draw lists instead (`launcher_list.h`), copied out of their slots and checked, for the emulator to draw itself. | Linux (dma-bufs), macOS (IOSurfaces) |
 | `launcher_runner.h` | The emulator as a plugin runner, so it is the launcher's plugin for its own games: it lists them (`library`), says how to start one (`launch_result` with `spawn`, usually itself), lists a game's achievements without playing it, and describes its settings and its games' settings. The game it spawns connects back as a session. | Linux, macOS, Windows |
-| `launcher_overlay_vk.h` | Optional, for Vulkan renderers. It imports the surfaces as images, copies the paused frame, and draws the menu as one premultiplied quad. It loads Vulkan through the emulator's own function pointers. | Linux; macOS (MoltenVK) next |
+| `launcher_overlay_vk.h` | Optional, for Vulkan renderers. It imports the surfaces as images, copies the paused frame, and draws the menu as one premultiplied quad. With `LC_CAP_DRAW_LISTS` it draws the shell's lists itself instead, with the shell's own shaders (`src/list_vk.cpp`), into a canvas it draws as that quad. It loads Vulkan through the emulator's own function pointers. | Buffers: Linux; macOS on Apple silicon (MoltenVK, KosmicKrisp; not yet run on a Mac). Lists: any Vulkan device. |
 
 An emulator with an OpenGL or Direct3D renderer uses `launcher_overlay.h` directly: the surfaces are plain dma-buf descriptors and IOSurfaces, and GPU work is tracked with any increasing serial (a fence counter, a timeline value).
+
+With `LC_CAP_OSK` too, the game's text input can go on the shell's on-screen keyboard, drawn into the game's frames like the menu: `lc_osk_open` when the game asks for text (0 means show the emulator's own), keys through `lc_callbacks.osk_edit`, the text back with `lc_osk_text` after every change. The emulator keeps the text and its rules; see `launcher_client.h`.
 
 Trophies and settings stay in each emulator, since only it knows how to read them.
 
@@ -24,7 +26,7 @@ add_subdirectory(3rdparty/launcher-client/client)
 target_link_libraries(my-emulator PRIVATE launcher_client)
 ```
 
-Without CMake, compile `src/*.cpp` (C++17), with `include/` and `src/` on the include path, and add `src/overlay_vk.cpp` if you want the Vulkan helper. It has no dependencies but the platform's own, and Vulkan's headers for the helper (`LAUNCHER_CLIENT_VULKAN_INCLUDE`, or `$VULKAN_SDK`).
+Without CMake, compile `src/*.cpp` (C++17), with `include/` and `src/` on the include path, and add `src/overlay_vk.cpp` and `src/list_vk.cpp` if you want the Vulkan helper. It has no dependencies but the platform's own, and Vulkan's headers for the helper (`LAUNCHER_CLIENT_VULKAN_INCLUDE`, or `$VULKAN_SDK`).
 
 A session:
 
@@ -56,6 +58,8 @@ A plugin runner connects with `lc_runner_connect` instead, declaring `LC_CAP_LIB
 
 Every call takes a NULL session and does nothing, so the rest of the emulator can call `lc_unlocked(lc_get(), ...)` without checking for launcher mode. The overlay with the Vulkan helper, on the present thread, is in `launcher_overlay_vk.h`'s comment.
 
+While the shell's menu or keyboard shows in the game's frames, the game's window keeps the focus, so its keys and mouse are the shell's to have: when `lc_overlay_wants_input` is true, pass each event on with `lc_overlay_input` (key, text, pointer, button, wheel) and don't act on it in the game. Send what each key typed as text too (with SDL3, call `SDL_StartTextInput` while the shell wants input): keys that type act only through their text. Send no text for a key pressed with Ctrl (Command on a Mac), which is a shortcut. Controllers need nothing; the shell reads them itself.
+
 ## Building and testing
 
 ```sh
@@ -66,9 +70,11 @@ cmake -S client -B build/client && cmake --build build/client && ctest --test-di
 - `protocol` checks every message the library sends and reads against `docs/plugin-api/examples`, which `crates/proto` writes from the Rust types, so the two can't drift apart.
 - `session` runs a session against a fake launcherd.
 - `runner` runs a plugin runner against a fake launcherd: scan, launch, achievement lists and settings.
-- `overlay` runs the overlay against a fake launcherd and a fake shell service: the surfaces, the buffer trade and the capture hand-off.
+- `overlay` runs the overlay against a fake launcherd and a fake shell service: the surfaces, the buffer trade and the capture hand-off, and draw lists in their slots.
+- `list` reads a draw list the shell's encoder wrote (`tests/data/list.ldl`, from `crates/render/tests/list.rs`) and refuses ones that point outside themselves.
 - `vk` draws the menu over a frame on a real GPU and checks the blended pixel. It skips itself where no device can share linear dma-bufs, as on lavapipe.
+- `vk_list` draws a menu the shell recorded (`tests/data/scene.ldl`) over a frame on any Vulkan device with BC textures (lavapipe will do), and holds it to what the shell's renderer drew from the same list (`tests/data/scene.rgba`). `crates/render/tests/list.rs` writes both.
 
-The shaders are compiled into `src/overlay_vk_shaders.h`, which is checked in. After changing `shaders/`, run `shaders/build.sh`.
+The quad's shaders are compiled into `src/overlay_vk_shaders.h`, which is checked in. After changing `shaders/`, run `shaders/build.sh`. The draw-list shaders, `src/list_vk_shaders.h`, are the shell's own (`crates/render/src/*.wgsl`) made into SPIR-V: `crates/render`'s tests fail when they're out of date, and `LAUNCHER_WRITE_EXAMPLES=1 cargo test -p launcher-render --test list` remakes them.
 
 Licence: MIT OR Apache-2.0, like the rest of this repository. Both are GPL-compatible, so the GPL emulator forks can link it.

@@ -39,7 +39,8 @@ std::function<void(std::unique_ptr<DmaBuf>)> g_capture_callback;
 std::function<void(uint32_t, uint32_t)>      g_view_callback;
 std::function<void()>                        g_ready_callback;
 std::atomic<bool>                            g_ready {false};
-std::atomic<bool>                            g_visible {false};
+// There are surfaces to draw from, or a set coming (set under g_mutex)
+std::atomic<bool>                            g_surfaces {false};
 std::atomic<bool>                            g_capture_requested {false};
 std::atomic<bool>                            g_capture_reporting {false};
 std::atomic<uint32_t>                        g_presents_owed {0};
@@ -78,14 +79,9 @@ void SetSurfaces(std::vector<std::unique_ptr<DmaBuf>> buffers, std::unique_ptr<D
 	// Replacing a config the present thread hasn't taken yet closes its surfaces
 	std::lock_guard lock(g_mutex);
 	g_pending       = std::move(config);
+	g_surfaces      = true;
 	g_ready         = false;
 	g_presents_owed = PRESENTS_AFTER_CHANGE;
-}
-
-void SetVisible(bool visible) {
-	if (g_visible.exchange(visible) != visible) {
-		g_presents_owed = PRESENTS_AFTER_CHANGE;
-	}
 }
 
 void RequestCapture() {
@@ -118,7 +114,7 @@ bool SurfacesReady() {
 }
 
 bool WantsPresents() {
-	return g_visible || g_capture_requested || g_capture_reporting || g_presents_owed != 0;
+	return g_surfaces || g_capture_requested || g_capture_reporting || g_presents_owed != 0;
 }
 
 #if KYTY_DMA_BUF_OVERLAY
@@ -650,6 +646,10 @@ void Renderer::BeginPresent(CommandScheduler& scheduler, vk::Extent2D window) {
 	auto& impl     = *m_impl;
 	impl.scheduler = &scheduler;
 	impl.ApplyPending();
+	{
+		std::lock_guard lock(g_mutex);
+		g_surfaces = g_pending.has_value() || !impl.buffers.empty();
+	}
 	impl.FreeRetired(false);
 	impl.ReportCapture();
 
@@ -728,7 +728,7 @@ void Renderer::Capture(vk::CommandBuffer command, vk::Image source, vk::Extent2D
 
 vk::ImageView Renderer::Acquire(vk::CommandBuffer command) {
 	auto& impl = *m_impl;
-	if (!g_visible || impl.buffers.empty()) {
+	if (impl.buffers.empty()) {
 		return nullptr;
 	}
 	// With a header, the buffer the exchange gave Kyty (nothing until one comes); without, the
@@ -783,6 +783,7 @@ void Renderer::BeginPresent(CommandScheduler& /*scheduler*/, vk::Extent2D /*wind
 	}
 	// Nothing to draw it with: let a request lapse, so the launcher falls back to its window
 	g_capture_requested = false;
+	g_surfaces          = false;
 }
 void          Renderer::Capture(vk::CommandBuffer /*command*/, vk::Image /*source*/,
                                 vk::Extent2D /*extent*/) {}

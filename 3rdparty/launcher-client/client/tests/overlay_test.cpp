@@ -8,6 +8,8 @@
 
 #include <atomic>
 #include <cstddef>
+#include <fstream>
+#include <iterator>
 #include <sys/mman.h>
 
 namespace {
@@ -51,7 +53,6 @@ struct Shown {
 		}
 		launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
 		              R"(","width":64,"height":64})");
-		launcher.send(R"({"type":"overlay_visible","visible":true})");
 		present_until(overlay, 0, frame, [&]() { return frame.buffer_count == 3 && lc_overlay_wants_presents(overlay); });
 		lc_overlay_surfaces_ready(overlay, frame.generation, true);
 	}
@@ -93,7 +94,7 @@ void overlay() {
 	CHECK(frame.buffer_count == 0 && frame.draw == -1 && !frame.capture);
 
 	// The menu opens: the next present copies its frame
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":false})");
 	CHECK(present_until(overlay, 0, frame, [&]() { return frame.capture; }));
 	CHECK(lc_overlay_wants_presents(overlay));
 	lc_capture capture {};
@@ -126,9 +127,32 @@ void overlay() {
 	CHECK(named && id && named->find("id")->as_uint() == *id);
 	CHECK(named && named->find("width")->as_uint() == 64);
 
-	// Shown: nothing to draw until the shell publishes
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	// Keys stay the game's until the shell takes them
+	lc_input key {};
+	key.kind = LC_INPUT_KEY;
+	key.key  = "Enter";
+	key.down = true;
+	CHECK(!lc_overlay_wants_input(overlay));
+	lc_overlay_input(overlay, &key);
+
+	// The menu takes the keys and mouse; the same pause asks for no second capture
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	CHECK(lc_overlay_wants_input(overlay));
+	lc_overlay_begin(overlay, 5, &frame);
+	CHECK(!frame.capture);
+	lc_overlay_end(overlay, 6, false);
+	key.key = "ArrowDown";
+	lc_overlay_input(overlay, &key);
+	lc_input click {};
+	click.kind = LC_INPUT_POINTER;
+	click.x    = 0.25f;
+	click.y    = 2.0f;
+	lc_overlay_input(overlay, &click);
+	const auto keyed = launcher.wait_for("overlay_input");
+	CHECK(keyed && keyed->find("input")->text("key") == "ArrowDown");
+	const auto pointed = launcher.wait_for("overlay_input", 1);
+	CHECK(pointed && pointed->find("input")->find("x")->as_uint() == 2500 && pointed->find("input")->find("y")->as_uint() == 10000);
 	lc_overlay_begin(overlay, 5, &frame);
 	CHECK(frame.draw == -1);
 	lc_overlay_end(overlay, 6, false);
@@ -162,12 +186,14 @@ void overlay() {
 	CHECK(frame.draw == -1 && frame.buffer_count == 0);
 	lc_overlay_end(overlay, 101, false);
 
-	// Closing: hidden, then the surfaces go
-	launcher.send(R"({"type":"overlay_visible","visible":false})");
-	launcher.send(R"({"type":"overlay_closed"})");
+	// Closing: the keys are the game's again, and nothing is drawn once the surfaces go
+	launcher.send(R"({"type":"overlay","pause":false,"input":false})");
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	CHECK(!lc_overlay_wants_input(overlay));
 	launcher.send(R"({"type":"overlay_surface","buffers":[],"width":0,"height":0})");
 	CHECK(present_until(overlay, 100, frame, [&]() { return frame.generation == 2; }));
 	CHECK(frame.buffer_count == 0 && frame.draw == -1);
+	CHECK(present_until(overlay, 100, frame, [&]() { return !lc_overlay_wants_presents(overlay); }));
 
 	lc_close(s);
 }
@@ -187,9 +213,9 @@ void closed_before_capture() {
 		return;
 	}
 	lc_frame frame {};
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
 	CHECK(present_until(o, 0, frame, [&]() { return frame.capture; }));
-	launcher.send(R"({"type":"overlay_closed"})");
+	launcher.send(R"({"type":"overlay","pause":false,"input":false})");
 	CHECK(present_until(o, 0, frame, [&]() { return !lc_overlay_wants_presents(o); }));
 	lc_capture capture {};
 	capture.fd = make_memfd(16);
@@ -266,7 +292,7 @@ void import_failed() {
 		return;
 	}
 	lc_frame frame {};
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
 	launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
 	              R"(","width":64,"height":64})");
 	CHECK(present_until(o, 0, frame, [&]() { return frame.capture && frame.buffer_count == 3; }));
@@ -292,12 +318,276 @@ void unsealed_header() {
 	CHECK(shown.overlay != nullptr && shown.frame.buffer_count == 0);
 }
 
+// New surfaces (a resize) while the menu shows: its last frame stays up until the shell has drawn
+// into the new set, which the same present then draws
+void resize_keeps_last_frame() {
+	FakeShell shell;
+	FakeShell resized;
+	Shown     shown(shell);
+	CHECK(shown.overlay != nullptr);
+	if (shown.overlay == nullptr) {
+		return;
+	}
+	lc_frame& f = shown.frame;
+	shell.publish(0);
+	lc_overlay_begin(shown.overlay, 0, &f);
+	CHECK(f.generation == 1 && f.draw == 0);
+	lc_overlay_end(shown.overlay, 1, true);
+
+	shown.launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" +
+	                    resized.name() + R"(","width":96,"height":96})");
+	// While the shell hasn't drawn into them, the old set's frame is drawn
+	bool kept = true;
+	for (int i = 0; i < 20; i++) {
+		lc_overlay_begin(shown.overlay, 1, &f);
+		kept = kept && f.generation == 1 && f.draw == 0 && f.width == 64;
+		lc_overlay_end(shown.overlay, 1, true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	CHECK(kept);
+	CHECK(resized.gets == 1);
+	resized.publish(0);
+	lc_overlay_begin(shown.overlay, 1, &f);
+	CHECK(f.generation == 2 && f.width == 96 && f.draw == 0 && f.fresh);
+	lc_overlay_end(shown.overlay, 2, true);
+}
+
+// New surfaces the shell never draws into are taken anyway, after a while
+void resize_waits_only_so_long() {
+	FakeShell shell;
+	FakeShell resized;
+	Shown     shown(shell);
+	CHECK(shown.overlay != nullptr);
+	if (shown.overlay == nullptr) {
+		return;
+	}
+	lc_frame& f = shown.frame;
+	shell.publish(0);
+	lc_overlay_begin(shown.overlay, 0, &f);
+	lc_overlay_end(shown.overlay, 1, true);
+	shown.launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" +
+	                    resized.name() + R"(","width":96,"height":96})");
+	for (int i = 0; i < 100 && resized.gets == 0; i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	int presents = 0;
+	while (presents < 1000) {
+		presents++;
+		lc_overlay_begin(shown.overlay, 1, &f);
+		lc_overlay_end(shown.overlay, 1, true);
+		if (f.generation == 2) {
+			break;
+		}
+	}
+	CHECK(f.generation == 2 && f.draw == -1);
+	CHECK(presents > 100 && presents < 200);
+}
+
+// Draw-list slots: memfds the test writes lists into, as the shell does
+struct Slots {
+	static constexpr size_t SIZE = 64 * 1024;
+	int                     fds[3] {};
+	uint8_t*                maps[3] {};
+
+	explicit Slots(bool sealed = true) {
+		for (int i = 0; i < 3; i++) {
+			fds[i]  = make_memfd(SIZE, sealed);
+			maps[i] = static_cast<uint8_t*>(::mmap(nullptr, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fds[i], 0));
+		}
+	}
+	~Slots() {
+		for (auto* m: maps) {
+			::munmap(m, SIZE);
+		}
+	}
+	// FakeShell closes the descriptors
+	std::vector<int> give() const { return {fds[0], fds[1], fds[2]}; }
+
+	// The shell's example list (data/list.ldl) with `serial`, into slot `i`
+	void write(int i, uint64_t serial) {
+		std::ifstream        file(LC_TEST_DATA_DIR "/list.ldl", std::ios::binary);
+		std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		if (bytes.size() >= 48 && bytes.size() <= SIZE) {
+			std::memcpy(bytes.data() + 40, &serial, 8);
+			std::memcpy(maps[i], bytes.data(), bytes.size());
+		}
+	}
+};
+
+lc_session* connect_lists(lc_callbacks& cb) {
+	cb.log = log_line;
+	lc_connect_info info {};
+	info.capabilities = LC_CAP_COMPOSITED_OVERLAY | LC_CAP_DRAW_LISTS;
+	return lc_connect(&info, &cb, nullptr, 0);
+}
+
+std::string lists_surface(FakeShell& shell, bool lists = true) {
+	return R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
+	       R"(","width":320,"height":200,"lists":)" + (lists ? "true" : "false") + "}";
+}
+
+// A session drawing lists says so, wants no capture, and is handed each list the shell publishes
+// once, copied out of its slot
+void draw_lists() {
+	Slots        slots;
+	FakeShell    shell(slots.give());
+	FakeLauncher launcher;
+	lc_callbacks cb {};
+	lc_session*  s = connect_lists(cb);
+	lc_overlay*  overlay = lc_overlay_get(s);
+	CHECK(overlay != nullptr);
+	if (overlay == nullptr) {
+		lc_close(s);
+		return;
+	}
+	const auto hello = launcher.hello();
+	bool       says  = false;
+	for (const auto& cap: hello->find("plugin")->find("capabilities")->items()) {
+		says = says || cap.as_string() == "draw_lists";
+	}
+	CHECK(says);
+
+	// The menu opens: no capture, ever
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
+	lc_frame frame {};
+	CHECK(!present_until(overlay, 0, frame, [&]() { return frame.capture; }));
+
+	// Nothing to draw until the shell's first list
+	launcher.send(lists_surface(shell));
+	CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 1 && lc_overlay_wants_presents(overlay); }));
+	CHECK(frame.buffer_count == 0 && frame.draw == -1 && frame.list == nullptr);
+
+	// The shell publishes its slot 0, and gets slot 1 back
+	slots.write(0, 7);
+	CHECK(shell.publish(0) == 1);
+	lc_overlay_begin(overlay, 0, &frame);
+	CHECK(frame.list != nullptr && frame.list_fresh);
+	CHECK(frame.list && frame.list->serial == 7 && frame.list->width == 320 && frame.list->instance_count == 3);
+	// Copied out and handed straight back: the game holds slot 0, the word slot 2
+	CHECK(shell.word() == 2);
+	// Asking again in the same present changes nothing
+	lc_overlay_begin(overlay, 0, &frame);
+	CHECK(frame.list && frame.list->serial == 7 && frame.list_fresh);
+	lc_overlay_end(overlay, 1, true);
+
+	// Next present: the same list, no longer fresh
+	lc_overlay_begin(overlay, 1, &frame);
+	lc_overlay_end(overlay, 2, true);
+	CHECK(frame.list && frame.list->serial == 7 && !frame.list_fresh);
+
+	// Two published before the game looks: it gets the newest (the shell carries the changes)
+	slots.write(1, 8);
+	CHECK(shell.publish(1) == 2);
+	slots.write(2, 9);
+	CHECK(shell.publish(2) == 1);
+	lc_overlay_begin(overlay, 2, &frame);
+	CHECK(frame.list && frame.list->serial == 9 && frame.list_fresh);
+	// The shell writing its slots meanwhile doesn't touch the game's copy
+	std::memset(slots.maps[2], 0, Slots::SIZE);
+	CHECK(frame.list && frame.list->serial == 9 && frame.list->instance_count == 3);
+	lc_overlay_end(overlay, 3, true);
+
+	// The menu closes and notices carry on: the game draws whatever's published, paused or not
+	launcher.send(R"({"type":"overlay","pause":false,"input":false})");
+	slots.write(0, 10);
+	shell.publish(0);
+
+	// A list that doesn't read: not drawn
+	CHECK(present_until(overlay, 4, frame, [&]() { return frame.list && frame.list->serial == 10; }));
+	const uint32_t back = shell.word() & ~NEWER;
+	std::memset(slots.maps[back], 0xff, 64);
+	CHECK(!shell.hung_up);
+	shell.publish(back);
+	lc_overlay_begin(overlay, 4, &frame);
+	CHECK(frame.list == nullptr);
+	// and the shell is told, by the service let go, so it comes to the front
+	CHECK(shell.wait_hung_up());
+	lc_close(s);
+}
+
+// A session drawing lists takes no buffers, and one drawing buffers no lists
+void lists_or_buffers() {
+	for (bool lists: {false, true}) {
+		Slots        slots;
+		FakeShell    shell(slots.give());
+		FakeLauncher launcher;
+		lc_callbacks cb {};
+		lc_session*  s = nullptr;
+		if (lists) {
+			s = connect_lists(cb);
+		} else {
+			cb.log = log_line;
+			lc_connect_info info {};
+			info.capabilities = LC_CAP_COMPOSITED_OVERLAY;
+			s                 = lc_connect(&info, &cb, nullptr, 0);
+		}
+		lc_overlay* overlay = lc_overlay_get(s);
+		launcher.send(lists_surface(shell, !lists));
+			lc_frame frame {};
+		CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 1; }));
+		CHECK(frame.buffer_count == 0 && frame.list == nullptr && shell.gets == 0);
+		lc_close(s);
+	}
+}
+
+// New slots (a list outgrew the old ones) keep the last list up until the shell's first list in
+// them, which starts over
+void new_slots_keep_the_last_list() {
+	Slots        slots;
+	FakeShell    shell(slots.give());
+	FakeLauncher launcher;
+	lc_callbacks cb {};
+	lc_session*  s       = connect_lists(cb);
+	lc_overlay*  overlay = lc_overlay_get(s);
+	launcher.send(lists_surface(shell));
+	lc_frame frame {};
+	CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 1; }));
+	slots.write(0, 1);
+	shell.publish(0);
+	lc_overlay_begin(overlay, 0, &frame);
+	CHECK(frame.list && frame.list->serial == 1);
+
+	Slots     bigger;
+	FakeShell next(bigger.give());
+	launcher.send(lists_surface(next));
+	for (int i = 0; i < 20; i++) {
+		lc_overlay_begin(overlay, 0, &frame);
+		lc_overlay_end(overlay, 0, false);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	CHECK(frame.generation == 1 && frame.list && frame.list->serial == 1);
+	bigger.write(0, 1);
+	next.publish(0);
+	CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 2; }));
+	CHECK(frame.list && frame.list->serial == 1 && frame.list_fresh);
+	lc_close(s);
+}
+
+// Slots the shell could shrink under the game are refused
+void unsealed_slots() {
+	Slots        slots(false);
+	FakeShell    shell(slots.give());
+	FakeLauncher launcher;
+	lc_callbacks cb {};
+	lc_session*  s       = connect_lists(cb);
+	lc_overlay*  overlay = lc_overlay_get(s);
+	launcher.send(lists_surface(shell));
+	lc_frame frame {};
+	CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 1; }));
+	slots.write(0, 1);
+	shell.publish(0);
+	lc_overlay_begin(overlay, 0, &frame);
+	CHECK(frame.list == nullptr && (shell.word() & NEWER) != 0);
+	CHECK(shell.wait_hung_up());
+	lc_close(s);
+}
+
 } // namespace
 
 int main() {
 	if (!lc_overlay_supported()) {
 		std::printf("overlay: skipped (no backend on this platform)\n");
-		return 0;
+		return SKIPPED;
 	}
 	overlay();
 	closed_before_capture();
@@ -305,5 +595,11 @@ int main() {
 	fresh_until_drawn();
 	import_failed();
 	unsealed_header();
+	resize_keeps_last_frame();
+	resize_waits_only_so_long();
+	draw_lists();
+	lists_or_buffers();
+	new_slots_keep_the_last_list();
+	unsealed_slots();
 	return finish("overlay");
 }

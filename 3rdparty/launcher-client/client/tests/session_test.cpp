@@ -16,6 +16,9 @@ struct Seen {
 	std::vector<bool>                  overlay;
 	std::map<std::string, std::string> invoked;
 	std::map<std::string, std::string> settings;
+	std::vector<bool>                  osk_available;
+	std::vector<std::string>           osk_edits; // "<osk>:<seq>:<op>:<text>:<by>:<cursor>"
+	std::vector<std::string>           osk_finished;
 
 	template <typename F>
 	bool wait(F done) {
@@ -33,10 +36,10 @@ lc_callbacks callbacks(Seen& seen) {
 		s->quit++;
 		s->cv.notify_all();
 	};
-	cb.overlay = [](void* user, bool opened) {
+	cb.pause = [](void* user, bool pause) {
 		auto*           s = static_cast<Seen*>(user);
 		std::lock_guard lock(s->mutex);
-		s->overlay.push_back(opened);
+		s->overlay.push_back(pause);
 		s->cv.notify_all();
 	};
 	cb.invoke = [](void* user, const char* key, const char* value) {
@@ -49,6 +52,25 @@ lc_callbacks callbacks(Seen& seen) {
 		auto*           s = static_cast<Seen*>(user);
 		std::lock_guard lock(s->mutex);
 		s->settings[key] = value != nullptr ? value : "(null)";
+		s->cv.notify_all();
+	};
+	cb.osk_available = [](void* user, bool available) {
+		auto*           s = static_cast<Seen*>(user);
+		std::lock_guard lock(s->mutex);
+		s->osk_available.push_back(available);
+		s->cv.notify_all();
+	};
+	cb.osk_edit = [](void* user, uint32_t osk, uint64_t seq, const lc_osk_edit* e) {
+		auto*           s = static_cast<Seen*>(user);
+		std::lock_guard lock(s->mutex);
+		s->osk_edits.push_back(std::to_string(osk) + ":" + std::to_string(seq) + ":" + std::to_string(e->op) + ":" + e->text +
+		                       ":" + std::to_string(e->by) + ":" + std::to_string(e->cursor));
+		s->cv.notify_all();
+	};
+	cb.osk_finish = [](void* user, uint32_t osk, bool accepted) {
+		auto*           s = static_cast<Seen*>(user);
+		std::lock_guard lock(s->mutex);
+		s->osk_finished.push_back(std::to_string(osk) + (accepted ? ":accepted" : ":cancelled"));
 		s->cv.notify_all();
 	};
 	return cb;
@@ -130,9 +152,12 @@ void session() {
 	launcher.send(R"({"type":"invoke","key":"save","value":null,"game":null})");
 	launcher.send(R"({"type":"invoke","key":"slot","value":{"Text":"2"}})");
 	launcher.send(R"({"type":"setting","key":"perf-overlay","value":{"Bool":true}})");
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":false})");
 	launcher.send(R"({"type":"something_newer","x":1})");
-	launcher.send(R"({"type":"overlay_closed"})");
+	// Only a change of pause reaches the game
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
+	launcher.send(R"({"type":"overlay","pause":false,"input":true})");
+	launcher.send(R"({"type":"overlay","pause":false,"input":false})");
 	launcher.send(R"({"type":"quit"})");
 	CHECK(seen.wait([&]() { return seen.quit.load() == 1; }));
 	{
@@ -151,6 +176,124 @@ void session() {
 
 	lc_close(s);
 	CHECK(lc_get() == nullptr);
+}
+
+// The on-screen keyboard: only while the launcher offers it, keys only for the one open, and
+// given back when the offer ends
+void osk() {
+	FakeLauncher launcher({R"({"type":"accepted","api":4,"game":7,"title":"Demon's Souls"})"});
+	Seen          seen;
+	const auto    cb = callbacks(seen);
+	lc_connect_info info {};
+	info.capabilities = LC_CAP_COMPOSITED_OVERLAY | LC_CAP_OSK;
+	lc_session* s     = lc_connect(&info, &cb, nullptr, 0);
+	CHECK(s != nullptr);
+	if (s == nullptr) {
+		return;
+	}
+	const auto hello = launcher.hello();
+	const auto caps  = hello ? hello->find("plugin")->find("capabilities")->dump() : std::string {};
+	CHECK(caps == R"(["session","composited_overlay","osk"])");
+
+	lc_osk_params params {};
+	params.kind       = LC_OSK_LATIN;
+	params.text       = "Ann";
+	params.cursor     = 3;
+	params.max_length = 16;
+	// Not offered yet: the emulator shows its own
+	CHECK(!lc_osk_available(s));
+	CHECK(lc_osk_open(s, &params) == 0);
+
+	launcher.send(R"({"type":"osk_available","available":true})");
+	CHECK(seen.wait([&]() { return seen.osk_available == std::vector<bool>({true}); }));
+	CHECK(lc_osk_available(s));
+	const uint32_t first = lc_osk_open(s, &params);
+	CHECK(first != 0);
+	const auto open = launcher.wait_for("osk_open");
+	CHECK(open && open->find("osk")->as_uint() == first && open->text("kind") == "latin" && open->text("text") == "Ann");
+	CHECK(open && open->find("max_length")->as_uint() == 16 && open->find("title") == nullptr);
+
+	// Keys for it, and for none that's open
+	const auto key = [&](uint32_t osk, uint64_t seq, const char* edit) {
+		launcher.send(std::string(R"({"type":"osk_edit","osk":)") + std::to_string(osk) + R"(,"seq":)" + std::to_string(seq) +
+		              R"(,"edit":)" + edit + "}");
+	};
+	key(first, 1, R"({"op":"insert","text":"e"})");
+	key(first + 100, 2, R"({"op":"backspace"})");
+	key(first, 3, R"({"op":"move","by":-2})");
+	key(first, 4, R"({"op":"replace","text":"x","cursor":1})");
+	key(first, 5, R"({"op":"undo"})");
+	CHECK(seen.wait([&]() { return seen.osk_edits.size() == 3; }));
+	{
+		std::lock_guard lock(seen.mutex);
+		const auto      f = std::to_string(first);
+		CHECK(seen.osk_edits == std::vector<std::string>({f + ":1:0:e:0:0", f + ":3:3::-2:0", f + ":4:4:x:0:1"}));
+	}
+	lc_osk_text(s, first, 3, "Anne", 2);
+	lc_osk_text(s, first + 100, 3, "nope", 0);
+	const auto text = launcher.wait_for("osk_text");
+	CHECK(text && text->text("text") == "Anne" && text->find("seq")->as_uint() == 3 && text->find("cursor")->as_uint() == 2);
+
+	// Another opens over it: the first closes first
+	const uint32_t second = lc_osk_open(s, &params);
+	CHECK(second != 0 && second != first);
+	const auto aborted = launcher.wait_for("osk_closed");
+	CHECK(aborted && aborted->find("osk")->as_uint() == first && aborted->text("result") == "aborted");
+	CHECK(launcher.wait_for("osk_open", 1).has_value());
+	launcher.send(R"({"type":"osk_finish","osk":)" + std::to_string(first) + R"(,"accepted":true})");
+	launcher.send(R"({"type":"osk_finish","osk":)" + std::to_string(second) + R"(,"accepted":false})");
+	CHECK(seen.wait([&]() { return seen.osk_finished.size() == 1; }));
+	{
+		std::lock_guard lock(seen.mutex);
+		CHECK(seen.osk_finished == std::vector<std::string>({std::to_string(second) + ":cancelled"}));
+	}
+	lc_osk_close(s, second, LC_OSK_CANCELLED);
+	lc_osk_close(s, second, LC_OSK_CANCELLED);
+	CHECK(launcher.wait_for("osk_closed", 1).has_value());
+	CHECK(lc_flush(s, 2000));
+	CHECK(launcher.count("osk_closed") == 2);
+	CHECK(launcher.count("osk_text") == 1);
+
+	// The offer ends with one open: it's the emulator's again, launcherd is told it closed (in case
+	// the open crossed the offer ending and arrived after a new one), and nothing more goes out for it
+	const uint32_t third = lc_osk_open(s, &params);
+	CHECK(launcher.wait_for("osk_open", 2).has_value());
+	launcher.send(R"({"type":"osk_available","available":false})");
+	CHECK(seen.wait([&]() { return seen.osk_available == std::vector<bool>({true, false}); }));
+	const auto given_back = launcher.wait_for("osk_closed", 2);
+	CHECK(given_back && given_back->find("osk")->as_uint() == third && given_back->text("result") == "aborted");
+	lc_osk_text(s, third, 0, "late", 4);
+	lc_osk_close(s, third, LC_OSK_ACCEPTED);
+	CHECK(lc_osk_open(s, &params) == 0);
+	CHECK(lc_flush(s, 2000));
+	CHECK(launcher.count("osk_text") == 1 && launcher.count("osk_closed") == 3 && launcher.count("osk_open") == 3);
+
+	// Offered again, then the launcher goes away: not offered any more
+	launcher.send(R"({"type":"osk_available","available":true})");
+	CHECK(seen.wait([&]() { return seen.osk_available.size() == 3; }));
+	launcher.disconnect();
+	CHECK(seen.wait([&]() { return seen.osk_available.size() == 4; }));
+	CHECK(!lc_osk_available(s));
+	lc_close(s);
+}
+
+// Closing the session doesn't call back that keyboards aren't offered, as it doesn't call closed
+void osk_close_quietly() {
+	FakeLauncher launcher({R"({"type":"accepted","api":4,"game":7,"title":"Demon's Souls"})"});
+	Seen         seen;
+	const auto   cb = callbacks(seen);
+	lc_connect_info info {};
+	info.capabilities = LC_CAP_COMPOSITED_OVERLAY | LC_CAP_OSK;
+	lc_session* s     = lc_connect(&info, &cb, nullptr, 0);
+	CHECK(s != nullptr);
+	if (s == nullptr) {
+		return;
+	}
+	launcher.send(R"({"type":"osk_available","available":true})");
+	CHECK(seen.wait([&]() { return seen.osk_available.size() == 1; }));
+	lc_close(s);
+	std::lock_guard lock(seen.mutex);
+	CHECK(seen.osk_available == std::vector<bool>({true}));
 }
 
 void no_configure() {
@@ -201,6 +344,8 @@ void outside_launcher() {
 
 int main() {
 	session();
+	osk();
+	osk_close_quietly();
 	no_configure();
 	stuck_launcher();
 	outside_launcher();

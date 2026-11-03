@@ -72,12 +72,13 @@ is. It follows the launcher's "Composited overlay" protocol (`docs/plugin-api.md
 - The GPU needs `VK_EXT_external_memory_dma_buf`, `VK_KHR_external_memory_fd` and
   `VK_EXT_image_drm_format_modifier`. Kyty turns them on when they're there, and sends `view` only
   then, so on a GPU without them the launcher brings its window to the front as before.
-- On `overlay_opened` the guest pauses, and the next present copies the frozen frame into a linear
-  dma-buf for the launcher (`capture_surface`), which draws the menu over it.
+- On `overlay` with `pause` the guest pauses, and the next present copies the frozen frame into a
+  linear dma-buf for the launcher (`capture_surface`), which draws the menu over it. It resumes
+  when `pause` goes false. Kyty passes no keys or mouse on, so `input` is ignored.
 - `overlay_surface` names the launcher's socket and its buffers; Kyty fetches the dma-bufs from it
   (`src/common/launcher/overlayPorts.cpp`) and imports them into Vulkan.
-- While `overlay_visible` is on, every present draws the newest buffer the launcher published over
-  the whole window, after the game's frame and Kyty's own overlays
+- While there are surfaces, every present draws the newest buffer the launcher published over the
+  whole window (nothing before its first), after the game's frame and Kyty's own overlays
   (`src/graphics/presentation/launcherOverlay.cpp`). The paused guest keeps presenting its last
   frame, so the menu animates.
 

@@ -227,9 +227,6 @@ static Launcher::Handlers MakeHandlers() {
 	};
 
 	handlers.overlay_surface = Overlay::OnSurfaces;
-	handlers.overlay_visible = [](bool visible) {
-		Libs::Graphics::LauncherOverlay::SetVisible(visible);
-	};
 
 	// The launcher's keyboard in place of Kyty's own (common/launcher/osk.h)
 	handlers.osk_available = [](bool available) {

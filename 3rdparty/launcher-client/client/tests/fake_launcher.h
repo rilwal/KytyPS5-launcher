@@ -101,6 +101,13 @@ public:
 	// Stops reading after the message it's reading, as a stuck launcherd would
 	void stop_reading() { m_stalled = true; }
 
+	// Hangs up, as a launcherd that quits would. Only after the connection is made.
+	void disconnect() {
+		if (m_fd >= 0) {
+			::shutdown(m_fd, SHUT_RDWR);
+		}
+	}
+
 private:
 	bool read_all(void* data, size_t len) {
 		auto* p = static_cast<char*>(data);

@@ -34,15 +34,14 @@ namespace Common::Launcher {
 // What the launcher asks of the game. Called on the session's reader thread.
 struct Handlers {
 	std::function<void()>     quit;
-	std::function<void(bool)> overlay; // The quick menu opened (true) or closed
+	std::function<void(bool)> overlay; // The quick menu opened (true) or closed: pause, or resume
 	// An overlay item was chosen: key and value as text (null for an action)
 	std::function<void(const std::string&, const std::optional<std::string>&)> invoke;
 	// A live setting changed while the game runs: Kyty's key, value as text (null for the default)
 	std::function<void(const std::string&, const std::optional<std::string>&)> setting;
-	// composited_overlay: the shell's surfaces (overlay_surface; no buffers takes them away), and
-	// whether to draw them (overlay_visible)
+	// composited_overlay: the shell's surfaces (overlay_surface; no buffers takes them away). Kyty
+	// draws whatever the shell has put in them: the menu, a keyboard, notices
 	std::function<void(const HostMessage&)> overlay_surface;
-	std::function<void(bool)>               overlay_visible;
 	// osk: whether the shell draws the game's keyboards now (false too when the connection
 	// closes), a key on the one open, and the player done with it (accepted, or cancelled)
 	std::function<void(bool)>                                       osk_available;
@@ -115,6 +114,7 @@ private:
 #endif
 	Handlers          m_handlers;
 	std::atomic<bool> m_failed {false};
+	bool              m_paused_for_menu = false; // The last overlay message's pause (reader thread)
 
 	struct QueuedFrame {
 		std::string payload;
