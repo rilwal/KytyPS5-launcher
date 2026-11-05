@@ -1,7 +1,6 @@
 #include "common/assert.h"
 
 #include "common/launcher/session.h"
-#include "common/logging/log.h"
 #include "common/subsystems.h"
 #include "kytyGitVersion.h"
 
@@ -9,74 +8,54 @@
 #include <cstdlib>
 #include <fmt/format.h>
 #include <mutex>
-#include <string>
 
 namespace Common {
 
-// What the first fatal report said, for the launcher (common/launcher/session.h). In a crash
-// cascade several threads report at once; the first is the useful one.
-static std::mutex  g_fatal_mutex;
-static std::string g_fatal_text;
-
-static void RememberFatal(std::string_view text) {
-	std::lock_guard lock(g_fatal_mutex);
-	if (g_fatal_text.empty()) {
-		g_fatal_text = text;
+// Tells the launcher (common/launcher/session.h) why Kyty is stopping. In a crash cascade several
+// threads report at once; the first is the useful one, and the others wait here until it is sent so
+// none of them exits first. Recursive so a check failing inside Failed() on the same thread skips
+// the report instead of deadlocking.
+static void ReportFatalToLauncher(std::string_view text) {
+	static std::recursive_mutex mutex;
+	static bool                 sent = false;
+	std::lock_guard             lock(mutex);
+	auto*                       session = Launcher::Session::Get();
+	if (sent || session == nullptr) {
+		return;
 	}
-}
-
-static std::string BuildFatalReport(const char* title, std::string_view text, const char* file,
-                                    int line) {
-	return fmt::format("--- Build ---\n{}\n{}\n{} in {}:{}\n", KYTY_BUILD_LABEL, title, text, file,
-	                   line);
-}
-
-static int DbgReport(const char* title, std::string_view text, const char* file, int line) {
-	// Failed checks read as code, so the launcher's message says what happened first.
-	RememberFatal(fmt::format("Kyty stopped with a fatal error (see the log). {}", text));
-	Log::WriteFatal(BuildFatalReport(title, text, file, line));
-	Subsystems::EmergencyShutdownActive();
-	return 1;
-}
-
-int DbgExitIfHandler(const char* expr, const char* file, int line) {
-	return DbgReport("--- Fatal Error ---", fmt::format("Error: condition ({}) is true", expr),
-	                 file, line);
-}
-
-int DbgNotImplementedHandler(const char* expr, const char* file, int line) {
-	return DbgReport("--- Fatal Error ---", fmt::format("Not implemented ({})", expr), file, line);
-}
-
-int DbgExitHandler(const char* file, int line, std::string_view text) {
-	RememberFatal(text);
-	Log::WriteFatal(BuildFatalReport("--- Error ---", text, file, line));
-	return 1;
-}
-
-int DbgExitHandler(const char* file, int line, fmt::text_style style, std::string_view text) {
-	RememberFatal(text);
-	Log::WriteFatal(style, BuildFatalReport("--- Error ---", text, file, line));
-	return 1;
-}
-
-void DbgExit(int status) {
-	if (auto* session = Launcher::Session::Get(); session != nullptr) {
-		// Trailing newlines are for the console.
-		std::string text;
-		{
-			std::lock_guard lock(g_fatal_mutex);
-			text = g_fatal_text;
-		}
-		std::string_view reason = text;
-		while (!reason.empty() && (reason.back() == '\n' || reason.back() == '\r')) {
-			reason.remove_suffix(1);
-		}
-		session->Failed(reason.empty() ? "Kyty stopped with a fatal error." : reason, "fatal_error");
+	sent = true;
+	// Trailing newlines are for the console.
+	while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+		text.remove_suffix(1);
 	}
+	session->Failed(text.empty() ? "Kyty stopped with a fatal error." : text, "fatal_error");
+}
+
+[[noreturn]] static void DbgReport(const char* title, std::string_view text, const char* file,
+                                   int line, std::string_view launcher_text) {
+	Log::WriteToConsoleAndLog(fmt::format("--- Build ---\n{}\n{}\n{} in {}:{}\n", KYTY_BUILD_LABEL,
+	                                      title, text, file, line));
+	ReportFatalToLauncher(launcher_text);
 	Subsystems::EmergencyShutdownActive();
 	std::fflush(nullptr);
-	std::_Exit(status);
+	std::_Exit(321);
+}
+
+void DbgExitIfHandler(const char* expr, const char* file, int line) {
+	const auto text = fmt::format("Error: condition ({}) is true", expr);
+	// Failed checks read as code, so the launcher's message says what happened first.
+	DbgReport("--- Fatal Error ---", text, file, line,
+	          fmt::format("Kyty stopped with a fatal error (see the log). {}", text));
+}
+
+void DbgNotImplementedHandler(const char* expr, const char* file, int line) {
+	const auto text = fmt::format("Not implemented ({})", expr);
+	DbgReport("--- Fatal Error ---", text, file, line,
+	          fmt::format("Kyty stopped with a fatal error (see the log). {}", text));
+}
+
+void DbgExitHandler(const char* file, int line, std::string_view text) {
+	DbgReport("--- Error ---", text, file, line, text);
 }
 
 } // namespace Common
