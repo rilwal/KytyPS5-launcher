@@ -15,7 +15,8 @@
       "dlc": false,
       "unlocked_at": 1700000000,
       "current": 0,
-      "total": 0
+      "total": 0,
+      "set": ""
     }
   ]
 }

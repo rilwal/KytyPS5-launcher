@@ -32,6 +32,7 @@ void Check(bool value, const char* text) {
 
 void TestTrophyList() {
 	Trophies::Package package;
+	package.title = "ASTRO BOT";
 	Trophies::Trophy  platinum;
 	platinum.id    = 0;
 	platinum.grade = 1;
@@ -88,6 +89,7 @@ void TestTrophyList() {
 
 	Check(Launcher::TrophyList(package, unlocks, 2)[1].id == "2:1",
 	      "other trophy sets prefix their ids");
+	Check(list[0].set == "ASTRO BOT", "each trophy names its set");
 	Check(Launcher::TickToUnix(0) == 0, "no tick, no time");
 }
 

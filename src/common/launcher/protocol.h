@@ -32,6 +32,8 @@ struct Achievement {
 	// A progressive trophy's progress towards its target; total 0 for any other trophy
 	uint32_t current = 0;
 	uint32_t total   = 0;
+	// Its trophy set's title, for a game with several; empty for none
+	std::string set;
 };
 
 // A row of the quick menu, as the launcher's Setting.
