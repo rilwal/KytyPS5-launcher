@@ -476,7 +476,7 @@ UdsResult ApplyUdsEvent(const Package& package, UnlockData& unlocks, std::string
 	return result;
 }
 
-static bool IsProgressTrophy(const Trophy& trophy) {
+bool IsProgressTrophy(const Trophy& trophy) {
 	return trophy.grade != 1 && trophy.progressive && trophy.target;
 }
 

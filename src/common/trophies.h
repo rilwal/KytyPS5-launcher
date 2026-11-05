@@ -93,6 +93,8 @@ struct Progress {
 // was modified.
 [[nodiscard]] bool UpdateTrophyProgress(const Package& package, int trophy_id, uint64_t value,
                                         UnlockData& unlocks, bool& changed);
+// Whether a trophy counts towards a target: progressive, with a target, and not the platinum.
+[[nodiscard]] bool IsProgressTrophy(const Trophy& trophy);
 // Progress of a progressive trophy from its stat or the reported progress, capped at the target.
 [[nodiscard]] std::optional<uint64_t> TrophyProgress(const Trophy&     trophy,
                                                      const UnlockData& unlocks);

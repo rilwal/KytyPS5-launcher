@@ -134,30 +134,32 @@ constexpr int NP_TROPHY2_ERROR_INVALID_TROPHY_ID = static_cast<int>(0x8055390a);
 constexpr int NP_TROPHY2_ERROR_INVALID_GROUP_ID  = static_cast<int>(0x8055390b);
 constexpr int NP_TROPHY2_ERROR_NOT_REGISTERED    = static_cast<int>(0x80553920);
 
-// Every trophy set loaded so far, by service label, as the launcher's list. Caller holds
-// g_trophy_mutex.
-static std::map<uint32_t, std::vector<Common::Launcher::Achievement>> g_launcher_lists;
 // Progressive trophies' progress as the launcher last got it, by launcher id. Caller holds
 // g_trophy_mutex.
 static std::map<std::string, std::pair<uint32_t, uint32_t>> g_launcher_progress;
 
-// The launcher keeps one list per game, so a new set is sent with the ones before it.
+// The launcher keeps one list per game, so a new set is sent with the ones before it, each as it
+// is now (a list's progress replaces what the launcher has).
 static void SendTrophyList(const TrophyState& state) {
 	auto* session = Common::Launcher::Session::Get();
 	if (session == nullptr || !state.launcher_user) {
 		return;
 	}
-	g_launcher_lists[state.service_label] =
-	    Common::Launcher::TrophyList(*state.package, state.unlocks, state.service_label);
+	std::vector<Common::Launcher::Achievement> all;
+	for (const auto& [key, loaded]: g_states) {
+		if (!loaded.launcher_user) {
+			continue;
+		}
+		auto list =
+		    Common::Launcher::TrophyList(*loaded.package, loaded.unlocks, loaded.service_label);
+		all.insert(all.end(), std::make_move_iterator(list.begin()),
+		           std::make_move_iterator(list.end()));
+	}
 	// The list carries progress
-	for (const auto& a: g_launcher_lists[state.service_label]) {
+	for (const auto& a: all) {
 		if (a.total != 0) {
 			g_launcher_progress[a.id] = {a.current, a.total};
 		}
-	}
-	std::vector<Common::Launcher::Achievement> all;
-	for (const auto& [label, list]: g_launcher_lists) {
-		all.insert(all.end(), list.begin(), list.end());
 	}
 	session->Achievements(all);
 }

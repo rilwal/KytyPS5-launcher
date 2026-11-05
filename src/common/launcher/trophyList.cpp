@@ -36,8 +36,8 @@ static std::string Grade(int grade) {
 
 std::optional<std::pair<uint32_t, uint32_t>> ProgressOf(const Trophies::Trophy&     trophy,
                                                         const Trophies::UnlockData& unlocks) {
-	// What Trophies::TrophyProgress counts: progressive trophies with a target, not the platinum
-	if (trophy.grade == 1 || !trophy.progressive || !trophy.target || *trophy.target == 0) {
+	// A target of 0 counts nothing to show
+	if (!Trophies::IsProgressTrophy(trophy) || *trophy.target == 0) {
 		return std::nullopt;
 	}
 	const auto total = static_cast<uint32_t>(
