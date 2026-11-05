@@ -46,17 +46,39 @@ void TestTrophyList() {
 	dlc.grade    = 3;
 	dlc.group_id = 0;
 	dlc.hidden   = true;
+	// Progressive: one counts a UDS stat, one the game reports, one is done
+	Trophies::Trophy relics;
+	relics.id          = 3;
+	relics.grade       = 3;
+	relics.progressive = true;
+	relics.target      = 50;
+	relics.uds_stat_id = 9;
+	Trophies::Trophy reported = relics;
+	reported.id               = 4;
+	reported.uds_stat_id.reset();
+	Trophies::Trophy done = reported;
+	done.id               = 5;
 	package.trophies.emplace(0, platinum);
 	package.trophies.emplace(1, bronze);
 	package.trophies.emplace(2, dlc);
+	package.trophies.emplace(3, relics);
+	package.trophies.emplace(4, reported);
+	package.trophies.emplace(5, done);
 
 	Trophies::UnlockData unlocks;
-	unlocks.unlocked = {1, 2};
+	unlocks.unlocked = {1, 2, 5};
 	// 2023-11-14 22:13:20 UTC
 	unlocks.timestamps.emplace(1, Trophies::UnixEpochTick + 1700000000ULL * 1000000ULL);
+	unlocks.max_stats.emplace(9, 30);
+	unlocks.progress.emplace(4, 12);
+	unlocks.progress.emplace(5, 3);
 
 	const auto list = Launcher::TrophyList(package, unlocks, 0);
-	Check(list.size() == 3, "every trophy is listed");
+	Check(list.size() == 6, "every trophy is listed");
+	Check(list[0].total == 0 && list[1].total == 0, "only progressive trophies have progress");
+	Check(list[3].current == 30 && list[3].total == 50, "a UDS stat's progress");
+	Check(list[4].current == 12 && list[4].total == 50, "progress the game reported");
+	Check(list[5].current == 50 && list[5].total == 50, "an unlocked one is done");
 	Check(list[0].grade == "platinum" && !list[0].unlocked_at, "platinum, locked");
 	Check(list[1].id == "1" && list[1].grade == "bronze" && list[1].unlocked_at == 1700000000 &&
 	          !list[1].dlc,

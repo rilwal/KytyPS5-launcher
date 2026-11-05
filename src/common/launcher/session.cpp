@@ -577,6 +577,12 @@ void Session::Unlocked(std::string_view id, std::optional<int64_t> at) {
 	Send(UnlockedMsg(id, at));
 }
 
+void Session::AchievementProgress(std::string_view id, uint32_t current, uint32_t total) {
+	LOGF("[Launcher] sending progress %.*s: %u/%u\n", static_cast<int>(id.size()), id.data(),
+	     current, total);
+	Send(AchievementProgressMsg(id, current, total));
+}
+
 void Session::OverlayItems(const std::vector<Setting>& items) {
 	Send(OverlayItemsMsg(items));
 }

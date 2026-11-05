@@ -1,7 +1,10 @@
 #include "common/launcher/trophyList.h"
 
 #include <fmt/format.h>
+#include <algorithm>
 #include <fstream>
+#include <limits>
+#include <tuple>
 #include <nlohmann/json.hpp>
 #include <sstream>
 
@@ -31,6 +34,21 @@ static std::string Grade(int grade) {
 	}
 }
 
+std::optional<std::pair<uint32_t, uint32_t>> ProgressOf(const Trophies::Trophy&     trophy,
+                                                        const Trophies::UnlockData& unlocks) {
+	// What Trophies::TrophyProgress counts: progressive trophies with a target, not the platinum
+	if (trophy.grade == 1 || !trophy.progressive || !trophy.target || *trophy.target == 0) {
+		return std::nullopt;
+	}
+	const auto total = static_cast<uint32_t>(
+	    std::min<uint64_t>(*trophy.target, std::numeric_limits<uint32_t>::max()));
+	if (unlocks.unlocked.contains(trophy.id)) {
+		return std::pair {total, total};
+	}
+	const auto value = Trophies::TrophyProgress(trophy, unlocks).value_or(0);
+	return std::pair {static_cast<uint32_t>(std::min<uint64_t>(value, total)), total};
+}
+
 std::vector<Achievement> TrophyList(const Trophies::Package&    package,
                                     const Trophies::UnlockData& unlocks, uint32_t service_label) {
 	std::vector<Achievement> list;
@@ -48,6 +66,9 @@ std::vector<Achievement> TrophyList(const Trophies::Package&    package,
 			const auto at = unlocks.timestamps.find(id);
 			// 0: unlocked at a time Kyty doesn't know
 			a.unlocked_at = at != unlocks.timestamps.end() ? TickToUnix(at->second) : 0;
+		}
+		if (const auto progress = ProgressOf(trophy, unlocks)) {
+			std::tie(a.current, a.total) = *progress;
 		}
 		list.push_back(std::move(a));
 	}

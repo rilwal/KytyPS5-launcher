@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Trophies as the launcher's achievements (common/launcher/session.h).
@@ -23,7 +24,13 @@ inline constexpr char ListTrophiesFlag[] = "--launcher-list-trophies";
 // A Kyty tick (microseconds since 0001-01-01) as Unix seconds.
 [[nodiscard]] int64_t TickToUnix(uint64_t tick);
 
-// The package's trophies with the user's unlocks.
+// A progressive trophy's progress as the launcher's (current, total): the value the game reported
+// or its UDS stat, out of the trophy's target, and the target once it's unlocked. Nullopt for a
+// trophy that doesn't count anything.
+[[nodiscard]] std::optional<std::pair<uint32_t, uint32_t>>
+ProgressOf(const Trophies::Trophy& trophy, const Trophies::UnlockData& unlocks);
+
+// The package's trophies with the user's unlocks and progress.
 [[nodiscard]] std::vector<Achievement> TrophyList(const Trophies::Package& package,
                                                   const Trophies::UnlockData& unlocks,
                                                   uint32_t service_label);

@@ -137,6 +137,9 @@ constexpr int NP_TROPHY2_ERROR_NOT_REGISTERED    = static_cast<int>(0x80553920);
 // Every trophy set loaded so far, by service label, as the launcher's list. Caller holds
 // g_trophy_mutex.
 static std::map<uint32_t, std::vector<Common::Launcher::Achievement>> g_launcher_lists;
+// Progressive trophies' progress as the launcher last got it, by launcher id. Caller holds
+// g_trophy_mutex.
+static std::map<std::string, std::pair<uint32_t, uint32_t>> g_launcher_progress;
 
 // The launcher keeps one list per game, so a new set is sent with the ones before it.
 static void SendTrophyList(const TrophyState& state) {
@@ -146,11 +149,42 @@ static void SendTrophyList(const TrophyState& state) {
 	}
 	g_launcher_lists[state.service_label] =
 	    Common::Launcher::TrophyList(*state.package, state.unlocks, state.service_label);
+	// The list carries progress
+	for (const auto& a: g_launcher_lists[state.service_label]) {
+		if (a.total != 0) {
+			g_launcher_progress[a.id] = {a.current, a.total};
+		}
+	}
 	std::vector<Common::Launcher::Achievement> all;
 	for (const auto& [label, list]: g_launcher_lists) {
 		all.insert(all.end(), list.begin(), list.end());
 	}
 	session->Achievements(all);
+}
+
+// Sends the progress of locked progressive trophies that moved since the launcher last got it
+// (an unlock tells it the rest). Caller holds g_trophy_mutex.
+static void SendTrophyProgress(const TrophyState& state) {
+	auto* session = Common::Launcher::Session::Get();
+	if (session == nullptr || !state.launcher_user) {
+		return;
+	}
+	for (const auto& [id, trophy]: state.package->trophies) {
+		if (state.unlocks.unlocked.contains(id)) {
+			continue;
+		}
+		const auto progress = Common::Launcher::ProgressOf(trophy, state.unlocks);
+		if (!progress) {
+			continue;
+		}
+		auto launcher_id      = Common::Launcher::TrophyId(state.service_label, id);
+		auto [sent, inserted] = g_launcher_progress.try_emplace(launcher_id, *progress);
+		if (!inserted && sent->second == *progress) {
+			continue;
+		}
+		sent->second = *progress;
+		session->AchievementProgress(launcher_id, progress->first, progress->second);
+	}
 }
 
 // Caller holds g_trophy_mutex. Both NpTrophy2 and UDS use the same user/service record.
@@ -777,10 +811,12 @@ static int KYTY_SYSV_ABI NpUniversalDataSystemPostEvent(int context, int handle,
 			if (LibNpTrophy2::Trophies::UpdateTrophyProgress(*state->package, *trophy_id, *progress,
 			                                                 state->unlocks, changed)) {
 				LibNpTrophy2::RecordTrophyUnlock(*state, *trophy_id, true);
-			} else if (changed &&
-			           !LibNpTrophy2::Trophies::SaveUnlockData(state->path, state->unlocks)) {
-				LOGF("[Trophy] could not save trophy progress to %s\n",
-				     state->path.string().c_str());
+			} else if (changed) {
+				if (!LibNpTrophy2::Trophies::SaveUnlockData(state->path, state->unlocks)) {
+					LOGF("[Trophy] could not save trophy progress to %s\n",
+					     state->path.string().c_str());
+				}
+				LibNpTrophy2::SendTrophyProgress(*state);
 			}
 		}
 	} else if (!uds_event.properties.integers.empty()) {
@@ -794,6 +830,10 @@ static int KYTY_SYSV_ABI NpUniversalDataSystemPostEvent(int context, int handle,
 			if (result.trophies.empty() && result.stats_changed &&
 			    !LibNpTrophy2::Trophies::SaveUnlockData(state->path, state->unlocks)) {
 				LOGF("[Trophy] could not save progress to %s\n", state->path.string().c_str());
+			}
+			// A stat can count towards a progressive trophy
+			if (result.stats_changed) {
+				LibNpTrophy2::SendTrophyProgress(*state);
 			}
 		}
 	}

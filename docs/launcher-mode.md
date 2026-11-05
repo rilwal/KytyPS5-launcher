@@ -24,7 +24,7 @@ environment, `kyty_emulator` is a plugin runner (`src/launcherPlugin.cpp`):
 - `launch`: answered with a `spawn` of itself, `--game <game folder>`, run in its own folder (where
   Kyty keeps saves, trophies and caches). A player's per-game arguments replace those, with
   `{game_dir}`, `{boot}` and `{title_id}` filled in.
-- `achievements`: a game's trophies and stored unlocks, before it's ever played.
+- `achievements`: a game's trophies, stored unlocks and progress, before it's ever played.
 - `settings` and `game_settings`, below. On Linux its `hello` also says its games draw the quick
   menu themselves (`composited_overlay`).
 
@@ -46,8 +46,9 @@ changes and Kyty runs as before.
 | Connected | `booting` |
 | First frame on screen | `ready {pid, window}`: the HWND, X11 window id or NSWindow number |
 | Settings the launcher sent can't be applied | `notify` (error) |
-| The game opens its trophy set | `achievements`: every trophy with the stored unlocks |
+| The game opens its trophy set | `achievements`: every trophy with the stored unlocks, and a progressive trophy's progress (`current`/`total`) |
 | A trophy (and maybe the platinum) unlocks | `unlocked {id, at}` per trophy |
+| A progressive trophy's progress moves (the game reports it, or a UDS stat it counts changes) | `achievement_progress {id, current, total}` |
 | Quick menu opened or closed | the guest pauses or resumes, then `paused` |
 | The window's size, with `ready` and on every change | `view {width, height}` (composited overlay) |
 | The frame the quick menu opened over | `capture_surface {id, width, height}` (composited overlay) |
@@ -143,7 +144,7 @@ counts. F2 still shows or hides the performance overlay, for that session only.
 ## Trophies without playing
 
 `kyty_emulator --launcher-list-trophies <game folder> [--user-id <n>] [--console-language <n>]`
-prints a game's trophies with the unlocks Kyty keeps for that user, as the launcher's achievement
+prints a game's trophies with the unlocks and progress Kyty keeps for that user, as the launcher's achievement
 list, as the plugin sends it. Unlocks are read from `_Trophies` in the current folder, as when Kyty
 plays, so run it from the folder Kyty runs games in (the executable's folder).
 

@@ -1,0 +1,6 @@
+{
+  "type": "achievement_progress",
+  "id": "mushrooms",
+  "current": 3,
+  "total": 10
+}

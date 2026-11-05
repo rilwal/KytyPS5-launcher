@@ -29,6 +29,9 @@ struct Achievement {
 	std::string            grade; // bronze, silver, gold or platinum, or empty for none
 	bool                   dlc    = false;
 	std::optional<int64_t> unlocked_at;
+	// A progressive trophy's progress towards its target; total 0 for any other trophy
+	uint32_t current = 0;
+	uint32_t total   = 0;
 };
 
 // A row of the quick menu, as the launcher's Setting.
@@ -66,6 +69,7 @@ using ConfigureValues = std::map<std::string, std::optional<std::string>>;
 // The list alone, as a JSON array (what --launcher-list-trophies prints)
 [[nodiscard]] std::string AchievementListJson(const std::vector<Achievement>& list);
 [[nodiscard]] Message UnlockedMsg(std::string_view id, std::optional<int64_t> at);
+[[nodiscard]] Message AchievementProgressMsg(std::string_view id, uint32_t current, uint32_t total);
 [[nodiscard]] Message OverlayItemsMsg(const std::vector<Setting>& items);
 // composited_overlay: the game window's size in pixels, and the frame the game paused on
 [[nodiscard]] Message ViewMsg(uint32_t width, uint32_t height);
