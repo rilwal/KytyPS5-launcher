@@ -60,6 +60,7 @@ std::vector<Achievement> TrophyList(const Trophies::Package&    package,
 		a.description = trophy.description;
 		a.hidden      = trophy.hidden;
 		a.grade       = Grade(trophy.grade);
+		a.set         = package.title;
 		// Group -1 is the base game; numbered groups are add-ons.
 		a.dlc = trophy.group_id >= 0;
 		if (unlocks.unlocked.contains(id)) {

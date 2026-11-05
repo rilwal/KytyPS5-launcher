@@ -95,7 +95,8 @@ static Json AchievementJson(const Achievement& a) {
 	            {"dlc", a.dlc},
 	            {"unlocked_at", Optional(a.unlocked_at)},
 	            {"current", a.current},
-	            {"total", a.total}};
+	            {"total", a.total},
+	            {"set", a.set}};
 	if (!a.grade.empty()) {
 		obj["grade"] = a.grade;
 	}
