@@ -28,6 +28,15 @@ inline constexpr uint32_t Cursor     = 1u << 2u; // Config::HideCursorEnabled
 // Safe to call from any thread.
 void WindowFollowConfig(uint32_t changes);
 
+// Nits of the display showing the game window; the defaults apply when the host reports none.
+struct DisplayLuminance {
+	float max_full_frame = 80.0f;
+	float max            = 1000.0f;
+	float min            = 0.0f;
+};
+
+[[nodiscard]] DisplayLuminance WindowGetDisplayLuminance();
+
 } // namespace Libs::Graphics
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_WINDOW_H_ */
