@@ -93,7 +93,9 @@ static Json AchievementJson(const Achievement& a) {
 	            {"description", a.description},
 	            {"hidden", a.hidden},
 	            {"dlc", a.dlc},
-	            {"unlocked_at", Optional(a.unlocked_at)}};
+	            {"unlocked_at", Optional(a.unlocked_at)},
+	            {"current", a.current},
+	            {"total", a.total}};
 	if (!a.grade.empty()) {
 		obj["grade"] = a.grade;
 	}
@@ -118,6 +120,13 @@ std::string AchievementListJson(const std::vector<Achievement>& list) {
 
 Message UnlockedMsg(std::string_view id, std::optional<int64_t> at) {
 	return Make({{"type", "unlocked"}, {"id", std::string(id)}, {"at", Optional(at)}});
+}
+
+Message AchievementProgressMsg(std::string_view id, uint32_t current, uint32_t total) {
+	return Make({{"type", "achievement_progress"},
+	             {"id", std::string(id)},
+	             {"current", current},
+	             {"total", total}});
 }
 
 // A SettingValue: {"Bool": true} or {"Text": "..."}
@@ -401,7 +410,11 @@ std::vector<std::string> SelfTest(const std::string& dir) {
 	check(AchievementsMsg({{"1", "First Steps", "Leave the starting village.", false, "bronze",
 	                        false, 1700000000}}),
 	      {"points", "rarity"});
+	check(AchievementsMsg({{"7", "Collector", "Find 50 relics.", false, "silver", false,
+	                        std::nullopt, 17, 50}}),
+	      {"points", "rarity"});
 	check(UnlockedMsg("1", 1700000000));
+	check(AchievementProgressMsg("7", 3, 10));
 	Setting slot;
 	slot.key           = "slot";
 	slot.section       = "Game";

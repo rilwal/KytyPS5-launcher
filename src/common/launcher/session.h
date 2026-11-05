@@ -79,6 +79,7 @@ public:
 	void Notify(std::string_view title, std::string_view body, bool error);
 	void Achievements(const std::vector<Achievement>& list);
 	void Unlocked(std::string_view id, std::optional<int64_t> at);
+	void AchievementProgress(std::string_view id, uint32_t current, uint32_t total);
 	void OverlayItems(const std::vector<Setting>& items);
 	// composited_overlay: the game window's size. Goes out with ready, and on every change after.
 	void View(uint32_t width, uint32_t height);
