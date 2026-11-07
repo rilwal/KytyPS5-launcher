@@ -11,6 +11,7 @@
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
 #include "gpu_test_shaders/gpu_test_ms_depth_spv.h"
+#include "gpu_tiler_shaders/fault_buffer_process_spv.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/gpu_defs.h"
@@ -251,6 +252,9 @@ struct ImageHeapTestAccess {
   }
 };
 
+// Guest faults the GPU fault route handled.
+std::atomic<uint64_t> g_handled_gpu_faults{0};
+
 struct TextureCacheTestAccess {
   static_assert(std::same_as<decltype(TextureCache::m_slot_images),
                              Common::SlotVector<Image>>);
@@ -362,6 +366,11 @@ struct TextureCacheTestAccess {
     return cache.m_download_images.contains(id);
   }
 
+  static bool WriteBacksPending(TextureCache &cache) {
+    std::scoped_lock lock{cache.m_write_back_mutex};
+    return !cache.m_write_backs.empty();
+  }
+
   static void TrackDownload(TextureCache &cache, ImageId id) {
     std::lock_guard lock(cache.m_lock);
     cache.TrackImageDownload(id, cache.m_slot_images[id]);
@@ -375,6 +384,10 @@ struct TextureCacheTestAccess {
 
   static void SetLinearReadback(TextureCache &cache, bool enabled) {
     cache.m_readback_linear_images = enabled;
+  }
+
+  static void SetStorageReadback(TextureCache &cache, bool enabled) {
+    cache.m_readback_storage_images = enabled;
   }
 
   static std::pair<uint8_t *, uint64_t>
@@ -3850,7 +3863,7 @@ public:
             "unmap returned before an earlier guest-memory callback");
 
     constexpr uintptr_t fault_base = 0x0000000200500000ull;
-    constexpr uint64_t fault_size = 0x10000;
+    constexpr uint64_t fault_size = 0x40000;
     int64_t fault_direct_offset = -1;
     Require("GpuCommandLane", "processor fault direct allocation",
             Libs::LibKernel::Memory::KernelAllocateDirectMemory(
@@ -4205,6 +4218,288 @@ public:
     Require("GpuCommandLane", "RELEASE_MEM label on a clean cached page",
             label_clean_stored,
             "a label left a clean cached copy of its page stale");
+
+    // With storage-image readback on, a GL2 writeback copies a tiled image's
+    // first shader write, or the first after a CPU write, back to guest
+    // memory, and guest accesses wait for the copy; a plain rewrite or a
+    // rewrite after a CPU write beside the image is not copied. Without it, a
+    // GL2 writeback copies nothing and a download blocks no access.
+    {
+      constexpr uint64_t storage_address = fault_base + 0x10000;
+      constexpr uint64_t storage_off_address = fault_base + 0x20000;
+      std::memset(reinterpret_cast<void *>(storage_address), 0x11, 0x30000);
+      // 2048x2304 RGBA32F, larger than the 64 MiB download ring.
+      constexpr uintptr_t large_address = 0x0000000210000000ull;
+      constexpr uint64_t large_size = 0x4800000;
+      int64_t large_direct_offset = -1;
+      void *large_memory = reinterpret_cast<void *>(large_address);
+      Require("GpuCommandLane", "storage readback large mapping",
+              LibKernel::Memory::KernelAllocateDirectMemory(
+                  0, LibKernel::Memory::KernelGetDirectMemorySize(), large_size,
+                  0x10000, 0, &large_direct_offset) == 0 &&
+                  LibKernel::Memory::KernelMapDirectMemory(
+                      &large_memory, large_size, 0x3, 0x10, large_direct_offset,
+                      0x10000) == 0 &&
+                  large_memory == reinterpret_cast<void *>(large_address),
+              "the large storage-readback mapping failed");
+      resources.MapMemory(large_address, large_size);
+      std::memset(large_memory, 0x11, 0x10000);
+      constexpr std::array<float, 4> texel{1.0f, 2.0f, 3.0f, 0.0f};
+      constexpr std::array<uint32_t, 4> stale{0x11111111u, 0x11111111u,
+                                              0x11111111u, 0x11111111u};
+      constexpr auto written = std::bit_cast<std::array<uint32_t, 4>>(texel);
+      // Two linear images share a page, so two write-backs arm it; they are
+      // copied back behind a parked priority thread. The page's last KiB lies
+      // beside them.
+      constexpr uint64_t shared_page = fault_base + 0x34000;
+      constexpr uint64_t beside_images = shared_page + 0xc00;
+      constexpr uint64_t suspended_address = fault_base + 0x3c000;
+      uint64_t suspended_tick = 0;
+      std::binary_semaphore parked{0};
+      bool signalled = false;
+      LibKernel::Memory::InstallGpuResources(&resources);
+      gpu.SendCommandSync([&] {
+        auto &texture_cache = resources.GetTextureCache();
+        auto processor = std::make_unique<CommandProcessor>(context, 0);
+        processor->BufferInit();
+        const auto shader_write = [&](uint64_t address,
+                                      vk::Extent3D extent = {8, 8, 1},
+                                      Prospero::TileMode tile =
+                                          Prospero::TileMode::kRenderTarget) {
+          auto desc =
+              MakeLinearDesc(address, 0, vk::Format::eR32G32B32A32Sfloat,
+                             Prospero::BufferFormat::k32_32_32_32Float,
+                             Prospero::ImageType::kColor2D, extent, 1, 16, 1);
+          desc.type = TextureCache::BindingType::Storage;
+          desc.info.tile_mode = tile;
+          desc.info.pitch = 0;
+          desc.info.UpdateSize();
+          desc.view_info.usage = vk::ImageUsageFlagBits::eStorage;
+          const auto image = texture_cache.FindImage(desc);
+          (void)texture_cache.FindTexture(image, desc);
+          TextureCacheTestAccess::ClearImage(
+              texture_cache, resources.GetCommandScheduler().Current(), image,
+              {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+              vk::ClearValue{vk::ClearColorValue{texel}});
+          return image;
+        };
+        // Whether the release completed with the guest texel at (0, 0) as
+        // expected. Without a label, only an interrupt is raised.
+        const auto release = [&](uint32_t gcr_cntl, uint64_t address,
+                                 const std::array<uint32_t, 4> &expected,
+                                 bool label_write = true) {
+          uint64_t label = 0;
+          auto packet =
+              label_write ? make_interrupt_packet(2, 0, &label, label_value, 0)
+                          : make_interrupt_packet(0, 2, nullptr, 0, 0);
+          packet[1] |= gcr_cntl << 12u;
+          Pm4Execution execution;
+          std::array<uint32_t, 4> guest{};
+          if (processor->Process(execution, packet) !=
+                  Pm4ProcessResult::Complete ||
+              label != (label_write ? label_value : 0)) {
+            return false;
+          }
+          std::memcpy(guest.data(), reinterpret_cast<const void *>(address),
+                      sizeof(guest));
+          return guest == expected;
+        };
+        const auto off_image = shader_write(storage_off_address);
+        Require("GpuCommandLane", "storage readback off",
+                !TextureCacheTestAccess::PendingDownload(texture_cache,
+                                                         off_image),
+                "storage readback off queued an image");
+        TextureCacheTestAccess::SetStorageReadback(texture_cache, true);
+        (void)shader_write(storage_address);
+        Require("GpuCommandLane", "storage readback without GL2 writeback",
+                release(0, storage_address, stale),
+                "a release without a GL2 writeback stored the image");
+        Require("GpuCommandLane", "storage readback after the label",
+                release(1u << 9u, storage_address, written),
+                "a read after a GL2-writeback label saw a stale image");
+        const auto image = shader_write(storage_address);
+        Require("GpuCommandLane", "storage readback of a rewrite",
+                !TextureCacheTestAccess::PendingDownload(texture_cache, image),
+                "a rewrite of a GPU-written image was queued again");
+        LibKernel::Memory::WriteBacking(storage_address, stale.data(),
+                                        sizeof(stale));
+        texture_cache.InvalidateMemory(storage_address, sizeof(stale));
+        (void)shader_write(storage_address);
+        Require(
+            "GpuCommandLane", "storage readback after a CPU write",
+            release(1u << 9u, storage_address, written, false),
+            "a CPU-written storage image was not stored at a GL2 interrupt");
+        // A CPU write beside a 2 KiB linear image, in its page, queues no
+        // rewrite.
+        constexpr uint64_t linear_address = fault_base + 0x30000;
+        constexpr Prospero::TileMode linear = Prospero::TileMode::kLinear;
+        (void)shader_write(linear_address, {8, 8, 1}, linear);
+        const bool linear_stored = release(1u << 9u, linear_address, written);
+        texture_cache.InvalidateMemory(linear_address + 0xc00, sizeof(stale));
+        const auto linear_image =
+            shader_write(linear_address, {8, 8, 1}, linear);
+        Require("GpuCommandLane", "storage readback beside a CPU write",
+                linear_stored && !TextureCacheTestAccess::PendingDownload(
+                                     texture_cache, linear_image),
+                "a CPU write beside a GPU-written image queued its rewrite");
+        // Nor does a new image's first write over GPU data in the buffer cache,
+        // unless that data covers only part of the image.
+        constexpr uint64_t buffered_address = fault_base + 0x3f800;
+        constexpr uint64_t half_buffered_address = fault_base + 0x3f000;
+        (void)buffer_cache.ObtainBuffer(fault_base + 0x3f400, 0xc00, true,
+                                        false);
+        const auto buffered = shader_write(buffered_address, {8, 8, 1}, linear);
+        const auto half_buffered =
+            shader_write(half_buffered_address, {8, 8, 1}, linear);
+        Require(
+            "GpuCommandLane", "storage readback over buffered GPU data",
+            !TextureCacheTestAccess::PendingDownload(texture_cache, buffered) &&
+                TextureCacheTestAccess::PendingDownload(texture_cache,
+                                                        half_buffered),
+            "a write over GPU data in the buffer cache was queued, or one "
+            "only partly over it was not");
+        TextureCacheTestAccess::DeleteImage(texture_cache, half_buffered);
+        (void)shader_write(large_address, {2048, 2304, 1});
+        Require("GpuCommandLane", "storage readback past the download ring",
+                release(1u << 9u, large_address, written),
+                "an image larger than the download ring was not read back");
+        // Without storage readback, an image enrolled for linear readback is
+        // copied back at the suspend point only, without trapping its pages.
+        TextureCacheTestAccess::SetStorageReadback(texture_cache, false);
+        TextureCacheTestAccess::SetLinearReadback(texture_cache, true);
+        constexpr uint64_t enrolled_address = fault_base + 0x38000;
+        const auto enrolled = shader_write(enrolled_address, {8, 8, 1}, linear);
+        const bool left =
+            release(1u << 9u, enrolled_address, stale) &&
+            TextureCacheTestAccess::PendingDownload(texture_cache, enrolled);
+        texture_cache.ProcessDownloadImages();
+        Require("GpuCommandLane", "linear readback without storage readback",
+                left &&
+                    !TextureCacheTestAccess::WriteBacksPending(texture_cache),
+                "without storage readback, a GL2 release copied an image back "
+                "or a download blocked guest accesses");
+        // With storage readback too, linear readback still queues a rewrite,
+        // and a GL2 writeback copies it back.
+        TextureCacheTestAccess::SetStorageReadback(texture_cache, true);
+        const bool requeued = TextureCacheTestAccess::PendingDownload(
+            texture_cache, shader_write(enrolled_address, {8, 8, 1}, linear));
+        TextureCacheTestAccess::SetLinearReadback(texture_cache, false);
+        Require("GpuCommandLane", "linear readback with storage readback",
+                requeued && release(1u << 9u, enrolled_address, written),
+                "with storage readback, linear readback did not queue a "
+                "rewrite, or a GL2 writeback did not copy it back");
+        // An acquire's GL2 writeback of the whole GL2 copies a first write
+        // back too; a ranged one or an acquire without a writeback does not.
+        const auto acquire = [&](uint32_t gcr_cntl) {
+          std::array<uint32_t, 8> packet{KYTY_PM4(8, Pm4::IT_ACQUIRE_MEM, 0)};
+          packet[7] = gcr_cntl;
+          Pm4Execution execution;
+          return processor->Process(execution, packet) ==
+                 Pm4ProcessResult::Complete;
+        };
+        constexpr uint64_t acquired_address = fault_base + 0x3d000;
+        const auto acquired = shader_write(acquired_address, {8, 8, 1}, linear);
+        Require("GpuCommandLane", "storage readback at a GL2 acquire",
+                acquire(0x0380u) && acquire(0x9000u) &&
+                    TextureCacheTestAccess::PendingDownload(texture_cache,
+                                                            acquired) &&
+                    acquire(0x8000u) && release(0, acquired_address, written),
+                "an acquire copied an image back without a whole-GL2 "
+                "writeback, or not with one");
+        // So does a GL2-writeback release without a label or interrupt.
+        constexpr uint64_t silent_address = fault_base + 0x3e000;
+        (void)shader_write(silent_address, {8, 8, 1}, linear);
+        auto silent = make_interrupt_packet(0, 0, nullptr, 0, 0);
+        silent[1] |= (1u << 9u) << 12u;
+        Pm4Execution silent_execution;
+        Require("GpuCommandLane", "storage readback at an unsignalled release",
+                processor->Process(silent_execution, silent) ==
+                        Pm4ProcessResult::Complete &&
+                    release(0, silent_address, written),
+                "a GL2-writeback release without a signal copied nothing back");
+        (void)shader_write(shared_page, {8, 8, 1}, linear);
+        (void)shader_write(shared_page + 0x800, {8, 4, 1}, linear);
+        resources.GetCommandScheduler().DeferPriorityOperation(
+            [&] { parked.acquire(); });
+        uint64_t label = 0;
+        auto packet = make_interrupt_packet(2, 0, &label, label_value, 0);
+        packet[1] |= (1u << 9u) << 12u;
+        Pm4Execution execution;
+        signalled = processor->Process(execution, packet) ==
+                        Pm4ProcessResult::Complete &&
+                    label == label_value;
+        // A download recorded without a submit, as ProcessDownloadImages
+        // leaves it, is submitted by the read that needs it.
+        TextureCacheTestAccess::SetLinearReadback(texture_cache, true);
+        (void)shader_write(suspended_address, {8, 8, 1}, linear);
+        texture_cache.ProcessDownloadImages();
+        suspended_tick = resources.GetCommandScheduler().CurrentTick();
+        TextureCacheTestAccess::SetLinearReadback(texture_cache, false);
+      });
+      // The label landed at once. A read waits for the copies instead of
+      // faulting in a loop, and so does an invalidation beside them before
+      // host I/O.
+      const auto faults = g_handled_gpu_faults.load();
+      std::array<uint32_t, 4> read{};
+      std::atomic<bool> read_done{false};
+      std::atomic<bool> invalidated{false};
+      bool stored = false;
+      std::thread reader([&] {
+        std::memcpy(read.data(), reinterpret_cast<const void *>(shared_page),
+                    sizeof(read));
+        read_done = true;
+      });
+      std::thread writer([&] {
+        (void)resources.InvalidateMemory(beside_images, sizeof(stale));
+        invalidated = true;
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+        int fds[2] = {-1, -1};
+        stored = ::pipe(fds) == 0 &&
+                 ::write(fds[1], stale.data(), sizeof(stale)) ==
+                     static_cast<ssize_t>(sizeof(stale)) &&
+                 ::read(fds[0], reinterpret_cast<void *>(beside_images),
+                        sizeof(stale)) == static_cast<ssize_t>(sizeof(stale));
+        ::close(fds[0]);
+        ::close(fds[1]);
+#else
+        std::memcpy(reinterpret_cast<void *>(beside_images), stale.data(),
+                    sizeof(stale));
+        stored = true;
+#endif
+      });
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      const bool waited = !read_done && !invalidated;
+      parked.release();
+      reader.join();
+      writer.join();
+      const auto wait_faults = g_handled_gpu_faults.load() - faults;
+      const bool unsubmitted =
+          resources.GetCommandScheduler().CurrentTick() == suspended_tick;
+      std::array<uint32_t, 4> suspended{};
+      std::memcpy(suspended.data(),
+                  reinterpret_cast<const void *>(suspended_address),
+                  sizeof(suspended));
+      gpu.SendCommandSync([&] {
+        TextureCacheTestAccess::SetStorageReadback(resources.GetTextureCache(),
+                                                   false);
+      });
+      LibKernel::Memory::InstallGpuResources(nullptr);
+      Require("GpuCommandLane", "linear readback at the suspend point",
+              unsubmitted && suspended == written,
+              "a read did not wait for an unsubmitted write-back");
+      Require("GpuCommandLane", "storage readback while the copy lands",
+              signalled && waited && read == written && wait_faults < 16 &&
+                  stored &&
+                  !TextureCacheTestAccess::WriteBacksPending(
+                      resources.GetTextureCache()),
+              "a GL2 label waited for its copies, or an access did not");
+      resources.UnmapMemory(large_address, large_size);
+      Require("GpuCommandLane", "storage readback large release",
+              LibKernel::Memory::KernelMunmap(large_address, large_size) == 0 &&
+                  LibKernel::Memory::KernelReleaseDirectMemory(
+                      large_direct_offset, large_size) == 0,
+              "the large storage-readback mapping release failed");
+    }
 
     resources.UnmapMemory(fault_base, fault_size);
     Require("GpuCommandLane", "processor fault unmap",
@@ -6077,6 +6372,168 @@ public:
             "a metadata write-only fill was not consumed as a clear");
     scheduler.Finish();
     std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // The fault scan reports each set page once and leaves the pages past its records set.
+  void CheckFaultBufferScan() {
+    constexpr const char *name = "FaultBufferScan";
+    constexpr u32 words = 2048;
+    constexpr u32 records = 1024; // Record 0 holds the count.
+    const vk::DescriptorSetLayoutBinding bindings[]{
+        {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
+        {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute}};
+    vk::DescriptorSetLayoutCreateInfo descriptors{};
+    descriptors.flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+    descriptors.bindingCount = 2;
+    descriptors.pBindings = bindings;
+    vk::DescriptorSetLayout descriptor_layout = nullptr;
+    RequireVk(name, "descriptors",
+              m_device.createDescriptorSetLayout(&descriptors, nullptr, &descriptor_layout),
+              "vkCreateDescriptorSetLayout");
+    vk::PipelineLayoutCreateInfo layout_info{};
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &descriptor_layout;
+    vk::PipelineLayout layout = nullptr;
+    RequireVk(name, "layout", m_device.createPipelineLayout(&layout_info, nullptr, &layout),
+              "vkCreatePipelineLayout");
+    const auto module = CompileSPV(FAULT_BUFFER_PROCESS_SPV, m_device);
+    vk::ComputePipelineCreateInfo pipeline_info{};
+    pipeline_info.stage.stage = vk::ShaderStageFlagBits::eCompute;
+    pipeline_info.stage.module = module;
+    pipeline_info.stage.pName = "main";
+    pipeline_info.layout = layout;
+    vk::Pipeline pipeline = nullptr;
+    RequireVk(name, "pipeline",
+              m_device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &pipeline),
+              "vkCreateComputePipelines");
+    m_device.destroyShaderModule(module, nullptr);
+
+    const auto bitmap = [](const auto &pages) {
+      std::vector<u32> ret(words, 0);
+      for (const auto page : pages) {
+        ret[page / 32] |= 1u << (page % 32);
+      }
+      return ret;
+    };
+    // Scans a bitmap of the pages and checks the records and the bits left.
+    const auto scan = [&](const char *stage, const std::vector<u32> &pages) {
+      auto fault = CreateStorageBuffer(name, bitmap(pages), words);
+      auto output = CreateStorageBuffer(name, {}, records * 2);
+      const vk::DescriptorBufferInfo infos[]{{fault.buffer, 0, fault.size},
+                                             {output.buffer, 0, output.size}};
+      std::array<vk::WriteDescriptorSet, 2> writes{};
+      for (u32 i = 0; i < writes.size(); i++) {
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = vk::DescriptorType::eStorageBuffer;
+        writes[i].pBufferInfo = &infos[i];
+      }
+      auto cmd = BeginCommands(name, stage);
+      cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+      cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+      cmd.dispatch(words / 4 / 64, 1, 1);
+      vk::MemoryBarrier barrier{};
+      barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+      barrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+      cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                          vk::PipelineStageFlagBits::eHost, {}, 1, &barrier, 0, nullptr, 0,
+                          nullptr);
+      EndSubmitAndFree(name, stage, cmd);
+
+      const auto left = ReadBuffer(name, fault, words);
+      const auto out = ReadBuffer(name, output, records * 2);
+      DestroyBuffer(&fault);
+      DestroyBuffer(&output);
+      const auto stored = std::min(out[0], records - 1);
+      std::set<u32> unreported(pages.begin(), pages.end());
+      bool reported_once = stored == std::min<size_t>(pages.size(), records - 1);
+      for (u32 i = 1; i <= stored; i++) {
+        const uint64_t record = out[i * 2] | (uint64_t{out[i * 2 + 1]} << 32);
+        const auto page = static_cast<u32>(record >> BufferCache::CACHING_PAGEBITS);
+        reported_once &= unreported.erase(page) == 1;
+      }
+      Require(name, stage, reported_once && left == bitmap(unreported),
+              "the scan lost, repeated or kept a reported page");
+    };
+    // Bits in each word of a block, several in one word, and in the last word.
+    scan("sparse", {0, 63, 6 * 32 + 3, 6 * 32 + 4, 6 * 32 + 5, 1000 * 32 + 17, 2047 * 32 + 31});
+    // 1200 pages, two per word, overflow the 1023 records; an odd record count leaves a word
+    // partly reported.
+    std::vector<u32> overflow;
+    for (u32 i = 0; i < 600; i++) {
+      overflow.push_back((3 * i + 1) * 32 + i % 31);
+      overflow.push_back((3 * i + 1) * 32 + 31);
+    }
+    scan("overflow", overflow);
+
+    m_device.destroyPipeline(pipeline, nullptr);
+    m_device.destroyPipelineLayout(layout, nullptr);
+    m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // A scan past its records creates buffers only for the records it stored, and the next scan
+  // reports the pages left.
+  void CheckFaultRecordsOverflow() {
+    constexpr const char *name = "FaultRecordsOverflow";
+    constexpr auto page = BufferCache::CACHING_PAGESIZE;
+    constexpr u32 pages = 1216;
+    EnsureRuntimeContext();
+    int64_t direct = -1;
+    void *mapped = nullptr;
+    Require(name, "allocation",
+            LibKernel::Memory::KernelAllocateDirectMemory(
+                0, LibKernel::Memory::KernelGetDirectMemorySize(), pages * page, page, 0,
+                &direct) == 0 &&
+                LibKernel::Memory::KernelMapDirectMemory(&mapped, pages * page, 0x3, 0, direct,
+                                                         32 * page) == 0,
+            "guest allocation failed");
+    const auto base = reinterpret_cast<uint64_t>(mapped);
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    auto &cache = context.GetBufferCache();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    context.MapMemory(base, pages * page);
+    // Faults the first `count` pages, a multiple of 32, then scans and processes the records.
+    const auto scan = [&](u32 count) {
+      const auto command = scheduler.Current().Handle();
+      if (count != 0) {
+        command.fillBuffer(cache.GetFaultBuffer()->Handle(), BufferCache::PageIndex(base) / 8,
+                           count / 8, ~0u);
+        vk::MemoryBarrier barrier{};
+        barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        barrier.dstAccessMask =
+            vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+        command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                vk::PipelineStageFlagBits::eComputeShader, {}, 1, &barrier, 0,
+                                nullptr, 0, nullptr);
+      }
+      cache.ProcessFaultBuffer();
+      scheduler.Finish();
+    };
+    // Area 1 keeps 32 records, more than the overflowing scan of area 0 counts past its own; read
+    // as a record, area 1's count is address 32, which no buffer can cover.
+    for (u32 area = 0; area < 8; area++) {
+      scan(area == 1 ? 32 : 0);
+    }
+    scan(pages);
+    scan(0);
+    bool reported = true;
+    for (u32 i = 0; i < pages; i++) {
+      reported &= static_cast<bool>(BufferCacheTestAccess::PageOwner(cache, base + i * page));
+    }
+    Require(name, "pages left", reported, "the pages past the records were not reported later");
+    context.UnmapMemory(base, pages * page);
+    scheduler.Finish();
+    Require(name, "release",
+            LibKernel::Memory::KernelMunmap(base, pages * page) == 0 &&
+                LibKernel::Memory::KernelReleaseDirectMemory(direct, pages * page) == 0,
+            "guest allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
   }
 
   void CheckBdaSyncUploads() {
@@ -8794,6 +9251,25 @@ public:
           name, "metadata buffer fill state",
           texture_cache.IsMetaCleared(base + metadata_b, 0),
           "BufferCache fill did not publish an exact-address metadata clear");
+
+      // A dynamic-resolution depth target keeps its HTile range at every extent; freeing the
+      // superseded image must leave its successor's consumed clear state alone.
+      constexpr uint64_t shared_htile = 0x13200;
+      auto retired_depth = MakeMetadataDepth(0x12400, shared_htile);
+      auto live_depth = MakeMetadataDepth(0x12500, shared_htile);
+      const auto retired_id = texture_cache.FindImage(retired_depth);
+      const auto live_id = texture_cache.FindImage(live_depth);
+      (void)texture_cache.FindDepthTarget(retired_id, retired_depth);
+      (void)texture_cache.FindDepthTarget(live_id, live_depth);
+      const bool live_consumed = texture_cache.TouchMeta(base + shared_htile, 0, false);
+      TextureCacheTestAccess::DeleteImage(texture_cache, retired_id);
+      (void)texture_cache.FindDepthTarget(live_id, live_depth);
+      Require(name, "superseded HTile image release",
+              live_consumed && !texture_cache.IsMetaCleared(base + shared_htile, 0),
+              "freeing a superseded depth image re-armed its successor's HTile clear");
+      TextureCacheTestAccess::DeleteImage(texture_cache, live_id);
+      Require(name, "HTile owner release", !texture_cache.IsMeta(base + shared_htile),
+              "freeing the HTile owner kept its clear state");
 
       // R-Type Final 3 reuses an old color allocation inside a new stencil plane,
       // with the same metadata address changing from DCC to HTile.
@@ -14933,8 +15409,8 @@ public:
   }
 
 
-  void CheckCubeFaceStorageExpansion() {
-    constexpr const char *name = "CubeFaceStorageExpansion";
+  void CheckCubeFaceStorage() {
+    constexpr const char *name = "CubeFaceStorage";
     constexpr uintptr_t base = 0x0000000204700000ull;
     constexpr uint64_t allocation_size = 0x10000;
     constexpr std::array<uint32_t, 6> half_red{0x3c00, 0x4000, 0x4200,
@@ -15001,15 +15477,16 @@ public:
         Image storage;
         storage.view = cache.FindTexture(binding.image_id, binding.desc);
         auto &image = cache.GetImage(binding.image_id);
+        // Face 0 has DEPTH 0, like Teardown's sky cube.
         Require(name, "face view and backing", storage.view != nullptr &&
                     image.info.pixel_format == vk::Format::eR16G16B16A16Sfloat &&
                     image.info.bytes_per_block == 8 &&
-                    image.info.resources.layers == face + 1 &&
-                    image.backing.layers == face + 1 &&
+                    image.info.resources.layers == 6 &&
+                    image.backing.layers == 6 &&
                     binding.desc.view_info.type == vk::ImageViewType::e2DArray &&
                     binding.desc.view_info.base_layer == face &&
-                    binding.desc.view_info.layer_count == 1,
-                "cube face did not expand the array or select its own layer");
+                    binding.desc.view_info.layer_count == 6 - face,
+                "cube face did not back six faces or select its own layer");
         image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
                       {}, scheduler.Current().Handle());
         storage.layout = image.backing.state.layout;
@@ -15053,6 +15530,7 @@ public:
       uint64_t alignment;
     };
     constexpr std::array cases{
+        TileCase{Prospero::TileMode::kStandard256B, 0x100, 0x100},
         TileCase{Prospero::TileMode::kStandard4KB, 0x4000, 0x1000},
         TileCase{Prospero::TileMode::kStandard64KB, 0x10000, 0x10000},
     };
@@ -22679,7 +23157,12 @@ private:
               const auto access =
                   info.access_violation_type == Exception::AccessViolationType::Write
                       ? PageFaultAccess::Write : PageFaultAccess::Read;
-              return LibKernel::Memory::HandleGpuFault(access, info.access_violation_vaddr);
+              if (!LibKernel::Memory::HandleGpuFault(
+                      access, info.access_violation_vaddr)) {
+                return false;
+              }
+              g_handled_gpu_faults.fetch_add(1, std::memory_order_relaxed);
+              return true;
             }),
             "failed to install the production guest-memory fault route");
     m_runtime_context.instance = m_instance;
@@ -55603,7 +56086,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--layered-image-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckUnifiedImageViewCache();
-    vulkan.CheckCubeFaceStorageExpansion();
+    vulkan.CheckCubeFaceStorage();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-view-cache-only") == 0) {
@@ -55624,6 +56107,8 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     vulkan.CheckBdaPageTableUploads();
     vulkan.CheckBdaSyncUploads();
+    vulkan.CheckFaultBufferScan();
+    vulkan.CheckFaultRecordsOverflow();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-range-only") == 0) {
@@ -55681,6 +56166,11 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, VectorReadlaneSelectsTwoKeysWithinWave());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--standard-tile-rt-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckRenderExecutorColorStandardTileDiscovery();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--rt1d-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckRenderExecutorColorDiscovery();
@@ -55707,11 +56197,6 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--standard64-rt-only") == 0) {
     CheckStandard64RenderTargetTileRoundTrip();
-    return 0;
-  }
-  if (argc == 2 && std::strcmp(argv[1], "--standard-tile-rt-only") == 0) {
-    VulkanHarness vulkan;
-    vulkan.CheckRenderExecutorColorStandardTileDiscovery();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-view-only") == 0) {
@@ -55885,11 +56370,13 @@ int main(int argc, char **argv) {
   vulkan.CheckNullTextureDescriptors();
   vulkan.CheckBdaPageTableUploads();
   vulkan.CheckBdaSyncUploads();
+  vulkan.CheckFaultBufferScan();
+  vulkan.CheckFaultRecordsOverflow();
   vulkan.CheckLargeSparseImageUpload();
   vulkan.CheckUnifiedTextureCacheFlow();
   vulkan.CheckUnifiedImageViewCache();
   vulkan.CheckPackedTextureComponents();
-  vulkan.CheckCubeFaceStorageExpansion();
+  vulkan.CheckCubeFaceStorage();
   if (rasterization) {
     vulkan.CheckGraphicsPushConstantBank();
     vulkan.CheckRenderExecutorColorDiscovery();
