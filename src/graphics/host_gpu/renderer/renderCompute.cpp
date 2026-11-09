@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/dispatchDump.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -34,6 +35,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -330,6 +332,19 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	m_context.GetImageHeap().BeginDraw();
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	// Dispatch dumps (GPU thread only): capture the inputs now, the outputs once recorded.
+	static DispatchDump dispatch_dump;
+	struct DumpScope {
+		DispatchDump&  dump;
+		RenderContext& context;
+		~DumpScope() { dump.Finish(context); }
+	};
+	std::optional<DumpScope> dump_scope;
+	if (Config::DispatchDumpEnabled()) {
+		const uint32_t dispatch[3] = {thread_group_x, thread_group_y, thread_group_z};
+		dispatch_dump.Begin(m_context, cs_regs, input_info, dispatch, mode);
+		if (dispatch_dump.Active()) dump_scope.emplace(dispatch_dump, m_context);
+	}
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
