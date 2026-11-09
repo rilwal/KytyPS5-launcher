@@ -726,4 +726,86 @@ void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
 	}
 }
 
+void BufferCache::SyncRangeToGuest(uint64_t vaddr, uint64_t size) {
+	const auto end = vaddr + size;
+	auto       it  = m_buffers.upper_bound(vaddr);
+	if (it != m_buffers.begin()) {
+		--it;
+	}
+	for (; it != m_buffers.end() && it->first < end; ++it) {
+		auto&      buffer = m_slot_buffers[it->second];
+		const auto start  = std::max(buffer.CpuAddress(), vaddr);
+		const auto finish = std::min(buffer.CpuAddress() + buffer.Size(), end);
+		if (start < finish && IsRegionGpuModified(start, finish - start) &&
+		    DownloadBufferMemory<false>(buffer, start, finish - start)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(start, finish - start);
+		}
+	}
+}
+
+bool BufferCache::ReadDeviceRange(uint64_t vaddr, uint64_t size, uint8_t* out) {
+	struct Part {
+		Buffer*        buffer;
+		vk::BufferCopy copy;
+		uint64_t       out_offset;
+	};
+	std::vector<Part> parts;
+	uint64_t          total_size = 0;
+	const auto        end        = vaddr + size;
+	auto              it         = m_buffers.upper_bound(vaddr);
+	if (it != m_buffers.begin()) {
+		--it;
+	}
+	for (; it != m_buffers.end() && it->first < end; ++it) {
+		auto&      buffer = m_slot_buffers[it->second];
+		const auto start  = std::max(buffer.CpuAddress(), vaddr);
+		const auto finish = std::min(buffer.CpuAddress() + buffer.Size(), end);
+		if (start >= finish) continue;
+		parts.push_back({&buffer, {buffer.Offset(start), total_size, finish - start}, start - vaddr});
+		total_size += Common::AlignUp(finish - start, 64);
+	}
+	if (parts.empty()) {
+		return false;
+	}
+	auto  download = m_download_buffer.MapDownload(total_size, 64);
+	auto& command  = m_scheduler.Current();
+	command.EndRendering();
+	const auto native = command.Handle();
+	for (auto& part: parts) {
+		part.copy.dstOffset += download.offset;
+		vk::BufferMemoryBarrier before {};
+		before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+		before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.buffer              = part.buffer->Handle();
+		before.offset              = 0;
+		before.size                = part.buffer->Size();
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
+		                       nullptr);
+		native.copyBuffer(part.buffer->Handle(), download.buffer->Handle(), 1, &part.copy);
+	}
+	vk::BufferMemoryBarrier after {};
+	after.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask       = vk::AccessFlagBits::eHostRead;
+	after.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	after.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	after.buffer              = download.buffer->Handle();
+	after.offset              = download.offset;
+	after.size                = total_size;
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                       vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
+	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	const auto tick = m_scheduler.CurrentTick();
+	m_scheduler.Wait(tick);
+	m_scheduler.WaitPriorityOperations(tick);
+	download.buffer->Invalidate(download.offset, total_size);
+	for (const auto& part: parts) {
+		std::memcpy(out + part.out_offset, download.mapped + (part.copy.dstOffset - download.offset),
+		            part.copy.size);
+	}
+	return true;
+}
+
 } // namespace Libs::Graphics

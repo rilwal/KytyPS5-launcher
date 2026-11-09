@@ -88,6 +88,12 @@ public:
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// For dispatch dumps, on the GPU thread. The first downloads the range's GPU-modified bytes
+	// to guest memory. The second copies the cached buffers' device bytes in the range over out,
+	// waiting for the GPU, and leaves guest memory and tracking as they are; false when no cached
+	// buffer covers any of it.
+	void               SyncRangeToGuest(uint64_t vaddr, uint64_t size);
+	bool               ReadDeviceRange(uint64_t vaddr, uint64_t size, uint8_t* out);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();

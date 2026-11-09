@@ -465,6 +465,12 @@ struct CsStageRegisters {
 	uint8_t  tidig_comp_cnt            = 0;
 	uint16_t lds_size                  = 0;
 	uint8_t  shared_vgprs              = 0;
+	// Raw values as written, for dispatch dumps.
+	uint32_t rsrc1_raw                 = 0;
+	uint32_t rsrc2_raw                 = 0;
+	uint32_t rsrc3_raw                 = 0;
+	uint32_t resource_limits_raw       = 0;
+	uint32_t start[3]                  = {0, 0, 0};
 };
 
 struct EsStageRegisters {

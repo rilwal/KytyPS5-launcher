@@ -38,6 +38,8 @@ namespace Libs::Graphics {
 
 // A mapped shader and its vertex metadata, parsed once when it is mapped.
 struct ShaderMapData: ShaderMappedData {
+	// The instructions alone, without the literal buffer; the whole program when unknown.
+	uint32_t             instruction_bytes = 0;
 	ShaderVertexMetadata vertex;
 	const char*          vertex_error = nullptr;
 };
@@ -58,8 +60,10 @@ void ShaderInit() {
 
 // The program's code and, at align16(code size), its literal buffer, as sized by the 0x30-byte
 // footer that ends a binary; the whole binary when the footer is unknown.
-static uint32_t ShaderProgramSize(const uint32_t* binary, uint32_t size) {
+static uint32_t ShaderProgramSize(const uint32_t* binary, uint32_t size,
+                                  uint32_t* instruction_bytes = nullptr) {
 	constexpr uint32_t FooterSize = 0x30;
+	if (instruction_bytes != nullptr) *instruction_bytes = size;
 	if (size < FooterSize) return size;
 	// Magic, then version, code size and literal buffer size at +0x10.
 	const auto* footer = binary + (size - FooterSize) / 4;
@@ -68,6 +72,7 @@ static uint32_t ShaderProgramSize(const uint32_t* binary, uint32_t size) {
 	    end % 4 != 0 || end > size - FooterSize) {
 		return size;
 	}
+	if (instruction_bytes != nullptr) *instruction_bytes = footer[5];
 	return static_cast<uint32_t>(end);
 }
 
@@ -81,7 +86,8 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	const auto*   binary = reinterpret_cast<const uint32_t*>(addr);
 	ShaderMapData mapped {data};
 	// Translation reads the bytes the hash covers.
-	mapped.code_size_bytes = ShaderProgramSize(binary, data.code_size_bytes);
+	mapped.code_size_bytes =
+	    ShaderProgramSize(binary, data.code_size_bytes, &mapped.instruction_bytes);
 	const auto hash        = XXH3_64bits(binary, mapped.code_size_bytes);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
@@ -99,6 +105,16 @@ static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
 	}
 
 	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
+}
+
+bool ShaderGetProgramRange(uint64_t addr, uint32_t& code_bytes, uint32_t& program_bytes) {
+	EXIT_IF(g_shader_map == nullptr);
+	std::scoped_lock lock(g_shader_map_mutex);
+	const auto iter = g_shader_map->find(addr);
+	if (iter == g_shader_map->end()) return false;
+	program_bytes = iter->second.data.code_size_bytes;
+	code_bytes    = iter->second.data.instruction_bytes;
+	return true;
 }
 
 static ShaderParams GetShaderParams(uint64_t shader_addr, uint64_t hash,

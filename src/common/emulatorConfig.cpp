@@ -257,6 +257,22 @@ bool GraphicsDebugDumpEnabled() {
 	return g_config->graphics_debug_dump_enabled;
 }
 
+bool DispatchDumpEnabled() {
+	return !g_config->dispatch_dump_folder.empty() && g_config->dispatch_dump_count != 0;
+}
+
+std::filesystem::path GetDispatchDumpFolder() {
+	return g_config->dispatch_dump_folder;
+}
+
+uint32_t GetDispatchDumpCount() {
+	return g_config->dispatch_dump_count;
+}
+
+uint32_t GetDispatchDumpAfterFrame() {
+	return g_config->dispatch_dump_after_frame;
+}
+
 LogDirection GetPrintfDirection() {
 	return g_config->printf_direction;
 }

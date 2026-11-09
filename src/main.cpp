@@ -79,6 +79,11 @@ static void PrintUsage() {
 	::printf("  --command-buffer-dump                Enable command buffer dumps.\n");
 	::printf("  --command-buffer-dump-folder <path>  Command buffer dump folder.\n");
 	::printf("  --graphics-debug-dump                Enable graphics debug dumps.\n");
+	::printf("  --dispatch-dump-folder <path>        Dump buffer-only compute dispatches for replay\n"
+	         "                                       outside Kyty (registers, code, memory before\n"
+	         "                                       and after). Default: off. Slow.\n");
+	::printf("  --dispatch-dump-count <num>          Distinct shaders to dump. Default: 16.\n");
+	::printf("  --dispatch-dump-after-frame <num>    Start dumping at this frame. Default: 0.\n");
 	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
 	::printf("  --printf-output-file <path>          Guest printf output file.\n");
 	::printf("  --profile                            Enable the Tracy profiler.\n");
@@ -416,6 +421,18 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			options.config.shader_log_folder = Common::PathFromUtf8(value);
 		} else if (arg == "--command-buffer-dump-folder") {
 			options.config.command_buffer_dump_folder = Common::PathFromUtf8(value);
+		} else if (arg == "--dispatch-dump-folder") {
+			options.config.dispatch_dump_folder = Common::PathFromUtf8(value);
+		} else if (arg == "--dispatch-dump-count") {
+			if (!ParseUint32(value, options.config.dispatch_dump_count)) {
+				::printf("invalid dispatch dump count: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--dispatch-dump-after-frame") {
+			if (!ParseUint32(value, options.config.dispatch_dump_after_frame)) {
+				::printf("invalid dispatch dump frame: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--printf-direction") {
 			if (!ParseEnum(value, options.config.printf_direction)) {
 				::printf("invalid printf direction: %s\n", value.c_str());

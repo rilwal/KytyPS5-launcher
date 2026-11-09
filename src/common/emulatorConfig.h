@@ -81,6 +81,10 @@ struct ConfigOptions {
 	bool                   command_buffer_dump_enabled = false;
 	std::filesystem::path  command_buffer_dump_folder  = "_Buffers";
 	bool                   graphics_debug_dump_enabled = false;
+	// Compute dispatch dumps for replay outside Kyty; an empty folder turns them off.
+	std::filesystem::path  dispatch_dump_folder;
+	uint32_t               dispatch_dump_count         = 16;
+	uint32_t               dispatch_dump_after_frame   = 0;
 	LogDirection           printf_direction            = LogDirection::Silent;
 	std::filesystem::path  printf_output_file          = "_kyty.txt";
 	bool                   profiler_enabled            = false;
@@ -156,6 +160,11 @@ bool                  CommandBufferDumpEnabled();
 std::filesystem::path GetCommandBufferDumpFolder();
 
 bool GraphicsDebugDumpEnabled();
+
+bool                  DispatchDumpEnabled();
+std::filesystem::path GetDispatchDumpFolder();
+uint32_t              GetDispatchDumpCount();
+uint32_t              GetDispatchDumpAfterFrame();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

@@ -286,6 +286,7 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 			cs_regs.data_addr |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
 			break;
 		case Pm4::COMPUTE_PGM_RSRC1:
+			cs_regs.rsrc1_raw = value;
 			cs_regs.vgprs =
 			    (value >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
 			cs_regs.priority = (value >> Pm4::COMPUTE_PGM_RSRC1_PRIORITY_SHIFT) &
@@ -307,6 +308,7 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 			     Pm4::COMPUTE_PGM_RSRC1_FWD_PROGRESS_MASK) != 0u;
 			break;
 		case Pm4::COMPUTE_PGM_RSRC2:
+			cs_regs.rsrc2_raw      = value;
 			cs_regs.scratch_en     = ((value >> Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_SHIFT) &
 			                          Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_MASK) != 0u;
 			cs_regs.user_sgpr      = (value >> Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) &
@@ -325,6 +327,7 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 			                         Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
 			break;
 		case Pm4::COMPUTE_PGM_RSRC3:
+			cs_regs.rsrc3_raw = value;
 			cs_regs.shared_vgprs =
 			    (value >> Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_SHIFT) &
 			    Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_MASK;
@@ -332,10 +335,10 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 		case Pm4::COMPUTE_NUM_THREAD_X: cs_regs.num_thread_x = value; break;
 		case Pm4::COMPUTE_NUM_THREAD_Y: cs_regs.num_thread_y = value; break;
 		case Pm4::COMPUTE_NUM_THREAD_Z: cs_regs.num_thread_z = value; break;
-		case Pm4::COMPUTE_START_X:
-		case Pm4::COMPUTE_START_Y:
-		case Pm4::COMPUTE_START_Z:
-		case Pm4::COMPUTE_RESOURCE_LIMITS:
+		case Pm4::COMPUTE_START_X: cs_regs.start[0] = value; break;
+		case Pm4::COMPUTE_START_Y: cs_regs.start[1] = value; break;
+		case Pm4::COMPUTE_START_Z: cs_regs.start[2] = value; break;
+		case Pm4::COMPUTE_RESOURCE_LIMITS: cs_regs.resource_limits_raw = value; break;
 		case Pm4::COMPUTE_TMPRING_SIZE:
 		case Pm4::COMPUTE_PACE_ID: break;
 		default:

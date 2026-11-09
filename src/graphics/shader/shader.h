@@ -342,6 +342,8 @@ struct ShaderMappedData {
 
 void ShaderInit();
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
+// The mapped program at addr: its instructions, and those plus the literal buffer after them.
+bool ShaderGetProgramRange(uint64_t addr, uint32_t& code_bytes, uint32_t& program_bytes);
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 
 void     ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info);
