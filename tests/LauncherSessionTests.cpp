@@ -123,6 +123,9 @@ void TestSettings() {
 	      "an unknown console language is refused");
 	Check(Launcher::Settings::Apply(cfg, "ps5-pro", "true").empty() && cfg.pro_enabled,
 	      "PS5 Pro mode applies");
+	Check(Launcher::Settings::Apply(cfg, "relaxed-shader-float", "true").empty() &&
+	          cfg.relaxed_shader_float,
+	      "relaxed shader float math applies");
 	Check(Launcher::Settings::Apply(cfg, "emulate-psn", "true").empty() && cfg.psn_emulation_enabled,
 	      "PSN emulation applies");
 	Check(Launcher::Settings::Apply(cfg, "readback-storage-images", "true").empty() &&
@@ -134,9 +137,9 @@ void TestSettings() {
 	                       "network-connected", "controller-volume", "controller-vibration"}) {
 		Check(Launcher::Settings::IsLive(key), "settings the emulator reads as it goes are live");
 	}
-	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "occlusion-queries",
-	                       "readback-linear-images", "readback-storage-images", "emulate-psn",
-	                       "console-language", "user-name"}) {
+	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "relaxed-shader-float",
+	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
+	                       "emulate-psn", "console-language", "user-name"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
