@@ -128,6 +128,9 @@ void TestSettings() {
 	      "relaxed shader float math applies");
 	Check(Launcher::Settings::Apply(cfg, "emulate-psn", "true").empty() && cfg.psn_emulation_enabled,
 	      "PSN emulation applies");
+	Check(Launcher::Settings::Apply(cfg, "readback-storage-images", "true").empty() &&
+	          cfg.readback_storage_images,
+	      "storage image readback applies");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
 	for (const char* key: {"perf-overlay", "resolution", "fullscreen", "stretch", "present-mode",
 	                       "vblank-frequency", "hide-cursor", "tessellation", "sync-raw-image-buffers",
@@ -135,8 +138,8 @@ void TestSettings() {
 		Check(Launcher::Settings::IsLive(key), "settings the emulator reads as it goes are live");
 	}
 	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "relaxed-shader-float",
-	                       "occlusion-queries", "readback-linear-images", "emulate-psn",
-	                       "console-language", "user-name"}) {
+	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
+	                       "emulate-psn", "console-language", "user-name"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
