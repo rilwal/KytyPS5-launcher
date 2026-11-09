@@ -393,6 +393,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
+		m_last_bound     = {&entry->second.resource_plan, entry->second.call_source != nullptr};
 		module.info.bindings.AdvancePushData(push_data_cursor);
 		return &module;
 	};

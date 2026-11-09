@@ -204,6 +204,13 @@ public:
 	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
+	// The resource plan of the program last bound by a Get*Program call, for dispatch dumps.
+	struct BoundPlan {
+		const ShaderRecompiler::IR::ResourcePlan* plan      = nullptr;
+		bool                                      has_calls = false;
+	};
+	[[nodiscard]] BoundPlan LastBoundPlan() const { return m_last_bound; }
+
 private:
 	friend struct PipelineCacheTestAccess;
 
@@ -248,6 +255,7 @@ private:
 	// Modules compiled per stage.
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
 	ProgramKey                             m_lookup_key;
+	BoundPlan                              m_last_bound;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
 	std::chrono::steady_clock::time_point m_next_driver_cache_save;
