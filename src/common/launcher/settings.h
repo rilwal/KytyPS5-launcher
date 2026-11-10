@@ -35,8 +35,9 @@ struct Row {
 	std::string              default_value;
 	bool                     live = false;
 	// One of the plugin's own settings rather than a game setting: text or a folder, which game
-	// settings can't be, or a value the plugin needs itself (the language it lists trophies in). The plugin passes
-	// these to the games it starts with SettingFlag; the launcher sends the rest in configure.
+	// settings can't be, or a value the plugin needs itself (the language it lists trophies in).
+	// The plugin passes these to the games it starts with SettingFlag; the launcher sends the rest
+	// in configure.
 	bool runner = false;
 };
 
