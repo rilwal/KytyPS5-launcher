@@ -8380,10 +8380,6 @@ public:
       constexpr uint64_t added_stencil_depth_offset = 0x60000;
       constexpr uint64_t added_stencil_offset = 0x70000;
       constexpr uint64_t added_stencil_size = 0x10000;
-      constexpr float added_stencil_depth_value = 0.75f;
-      std::memcpy(memory + added_stencil_depth_offset,
-                  &added_stencil_depth_value,
-                  sizeof(added_stencil_depth_value));
       auto depth_only_source = MakeLinearDesc(
           base + added_stencil_depth_offset, 0x10000, vk::Format::eD32Sfloat,
           Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
@@ -10838,45 +10834,16 @@ public:
       if (!texture_cache.GetImage(combined_destination_image).IsGpuModified()) {
         texture_cache.MarkGpuWritten(combined_destination_image);
       }
-      constexpr float stale_added_stencil_depth = 0.125f;
-      Libs::LibKernel::Memory::WriteBacking(
-          combined_destination.info.data.address, &stale_added_stencil_depth,
-          sizeof(stale_added_stencil_depth));
-      const auto depth_gc_tick = scheduler.CurrentTick();
       TextureCacheTestAccess::ConfigureGarbageCollection(
           texture_cache, std::array{combined_destination_image}, 81, 0);
       texture_cache.RunGarbageCollector();
-      float depth_before_completion = 0.0f;
-      Libs::LibKernel::Memory::TryReadBacking(
-          combined_destination.info.data.address, &depth_before_completion,
-          sizeof(depth_before_completion));
-      const bool depth_image_retired = !TextureCacheTestAccess::Contains(
-          texture_cache, combined_destination_image);
-      const bool depth_proxy_retired = !texture_cache.FindImageFromRange(
-          base + added_stencil_offset, added_stencil_size, false);
-      Require(
-          name, "depth/stencil deferred pressure retirement",
-          depth_image_retired && depth_proxy_retired &&
-              scheduler.CurrentTick() == depth_gc_tick &&
-              depth_before_completion == stale_added_stencil_depth,
-          fmt::format(
-              "GC failed to retire/defer depth: image={} proxy={} tick={}/{} "
-              "depth={}/{}",
-              depth_image_retired, depth_proxy_retired, scheduler.CurrentTick(),
-              depth_gc_tick, depth_before_completion, stale_added_stencil_depth)
-              .c_str());
-      scheduler.Finish();
-      scheduler.DrainPriorityOperations();
-      float depth_after_completion = 0.0f;
-      Libs::LibKernel::Memory::TryReadBacking(
-          combined_destination.info.data.address, &depth_after_completion,
-          sizeof(depth_after_completion));
-      Require(name, "depth/stencil depth-plane preservation",
-              depth_after_completion == added_stencil_depth_value,
-              "GC discarded the current depth plane of a depth/stencil "
-              "image");
+      Require(name, "depth/stencil pressure retention",
+              TextureCacheTestAccess::Contains(texture_cache,
+                                               combined_destination_image),
+              "GC retired a GPU depth/stencil image whose stencil it cannot "
+              "download");
 
-      constexpr size_t gc_depth_pair_count = 6;
+      constexpr size_t gc_depth_pair_count = 11;
       constexpr uint64_t gc_depth_pair_offset = 0x350000;
       constexpr uint64_t gc_depth_pair_stride = 0x1000;
       std::array<ImageId, gc_depth_pair_count> gc_depth_images{};
@@ -10910,7 +10877,7 @@ public:
                               [](ImageId image) { return bool{image}; }) &&
               std::ranges::all_of(gc_stencil_images,
                                   [](ImageId image) { return bool{image}; }),
-          "failed to create six depth/stencil association pairs");
+          "failed to create eleven depth/stencil association pairs");
       TextureCacheTestAccess::ConfigureGarbageCollection(
           texture_cache, gc_depth_lru, 81, UINT64_MAX);
       texture_cache.RunGarbageCollector();
@@ -10925,7 +10892,7 @@ public:
       }
       Require(name, "depth/stencil GC traversal budget", gc_depth_budget,
               "recursive association deletion stopped LRU traversal or "
-              "exceeded the ten-entry deletion budget");
+              "exceeded the ten-retirement budget");
 
       constexpr uint64_t large_offset = 0x400000;
       constexpr uint32_t large_width = 4096;
@@ -10938,18 +10905,19 @@ public:
           base + large_offset, large_size, vk::Format::eR8G8B8A8Unorm,
           Prospero::BufferFormat::k8_8_8_8UNorm, Prospero::ImageType::kColor2D,
           {large_width, large_height, 1}, 1, 4, 1);
-      const auto RunLargeReadback = [&](uint32_t clear_value) {
-        const auto image = texture_cache.FindImage(large_desc);
-        Require(name, "near-capacity image clear",
+      const auto RunPressureReadback = [&](TextureCache::ImageDesc desc,
+                                           uint32_t clear_value) {
+        const auto image = texture_cache.FindImage(desc);
+        const auto size = desc.info.data.size;
+        Require(name, "pressure readback image clear",
                 texture_cache.ClearImageFromBuffer(
-                    command, large_desc.info.data.address,
-                    large_desc.info.data.size, clear_value),
-                "failed to write the near-capacity readback source image");
+                    command, desc.info.data.address, size, clear_value),
+                "failed to write the readback source image");
         const std::array<uint64_t, 3> sample_offsets{
-            0, large_size / 2, large_size - sizeof(uint32_t)};
+            0, size / 2, size - sizeof(uint32_t)};
         constexpr uint32_t stale = 0;
         for (const auto offset : sample_offsets) {
-          Libs::LibKernel::Memory::WriteBacking(base + large_offset + offset,
+          Libs::LibKernel::Memory::WriteBacking(desc.info.data.address + offset,
                                                 &stale, sizeof(stale));
         }
         TextureCacheTestAccess::ConfigureGarbageCollection(
@@ -10959,31 +10927,82 @@ public:
         const auto handle =
             BufferCacheTestAccess::DownloadBuffer(resources.GetBufferCache())
                 .Handle();
-        Require(
-            name, "near-capacity deferred retirement",
-            !TextureCacheTestAccess::Contains(texture_cache, image) &&
-                scheduler.CurrentTick() == tick,
-            "near-capacity readback was rejected or synchronously submitted");
+        Require(name, "pressure readback deferred retirement",
+                !TextureCacheTestAccess::Contains(texture_cache, image) &&
+                    scheduler.CurrentTick() == tick,
+                "readback was rejected or synchronously submitted");
         scheduler.Finish();
         scheduler.DrainPriorityOperations();
         bool content = true;
         for (const auto offset : sample_offsets) {
           uint32_t value = 0;
-          Libs::LibKernel::Memory::TryReadBacking(base + large_offset + offset,
-                                                  &value, sizeof(value));
+          Libs::LibKernel::Memory::TryReadBacking(
+              desc.info.data.address + offset, &value, sizeof(value));
           content &= value == clear_value;
         }
-        Require(
-            name, "near-capacity readback content", content,
-            "near-capacity image readback did not publish its GPU contents");
+        Require(name, "pressure readback content", content,
+                "image readback did not publish its GPU contents");
         return handle;
       };
-      const auto large_download = RunLargeReadback(0xa5a5a5a5u);
-      const auto reused_large_download = RunLargeReadback(0x5a5a5a5au);
+      const auto large_download = RunPressureReadback(large_desc, 0xa5a5a5a5u);
+      const auto reused_large_download =
+          RunPressureReadback(large_desc, 0x5a5a5a5au);
       Require(name, "near-capacity shared download reuse",
               large_download == reused_large_download,
               "successive near-capacity image transfers replaced the shared "
               "download buffer");
+
+      constexpr uint64_t gc_kept_offset = 0x2e40000;
+      constexpr uint64_t gc_kept_stride = 0x1000;
+      // Ten GPU images kept before pressure, then ten heap-referenced clean
+      // images, ahead of one clean image within the ten-retirement budget.
+      constexpr size_t gc_kept_count = 20;
+      std::array<ImageId, gc_kept_count + 1> gc_kept_lru{};
+      for (size_t index = 0; index < gc_kept_lru.size(); index++) {
+        auto desc = MakeLinearDesc(
+            base + gc_kept_offset + index * gc_kept_stride, sizeof(uint32_t),
+            vk::Format::eR32Uint, Prospero::BufferFormat::k32UInt,
+            Prospero::ImageType::kColor2D, {1, 1, 1}, 1, 4, 1);
+        gc_kept_lru[index] = texture_cache.FindImage(desc);
+        (void)texture_cache.FindTexture(gc_kept_lru[index], desc);
+        if (index < gc_kept_count / 2) {
+          texture_cache.MarkGpuWritten(gc_kept_lru[index]);
+        } else if (index < gc_kept_count) {
+          texture_cache.GetImage(gc_kept_lru[index]).heap_refs.fetch_add(1u);
+        }
+      }
+      TextureCacheTestAccess::ConfigureGarbageCollection(
+          texture_cache, gc_kept_lru, 17, UINT64_MAX);
+      texture_cache.RunGarbageCollector();
+      Require(name, "kept images outside the deletion budget",
+              !TextureCacheTestAccess::Contains(texture_cache,
+                                                gc_kept_lru.back()) &&
+                  std::ranges::all_of(
+                      std::span(gc_kept_lru).first(gc_kept_count),
+                      [&](ImageId image) {
+                        return TextureCacheTestAccess::Contains(texture_cache,
+                                                                image);
+                      }),
+              "kept GPU or heap-referenced images spent the deletion budget "
+              "of the aged clean image behind them");
+
+      auto gc_tiled = MakeLinearDesc(
+          base + 0x2f00000, 256 * 256 * sizeof(uint32_t),
+          vk::Format::eR8G8B8A8Unorm, Prospero::BufferFormat::k8_8_8_8UNorm,
+          Prospero::ImageType::kColor2D, {256, 256, 1}, 1, 4, 1);
+      gc_tiled.type = BindingType::Storage;
+      gc_tiled.info.tile_mode = Prospero::TileMode::kRenderTarget;
+      gc_tiled.info.UpdateSize();
+      gc_tiled.view_info.usage = vk::ImageUsageFlagBits::eStorage;
+      (void)RunPressureReadback(gc_tiled, 0x3c5a3c5au);
+      auto gc_depth = MakeLinearDesc(
+          base + 0x2f40000, 64 * 64 * sizeof(float), vk::Format::eD32Sfloat,
+          Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
+          {64, 64, 1}, 1, 4, 1);
+      gc_depth.type = BindingType::DepthTarget;
+      gc_depth.view_info.aspect = vk::ImageAspectFlagBits::eDepth;
+      gc_depth.view_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+      (void)RunPressureReadback(gc_depth, std::bit_cast<uint32_t>(0.75f));
 
       constexpr uint64_t tile_alias_offset = 0x2000000;
       constexpr uint64_t tile_alias_size = 0x400000;
@@ -51335,6 +51354,48 @@ void CheckDepthTextureEncoding() {
               IsSupportedDepthTextureEncoding(pipe_aligned_metadata),
           "uncompressed depth rejected inactive metadata address bits");
 
+  // Demon's Souls samples an uncompressed depth target whose T# names mip-stats
+  // counter 8 with the counter disabled.
+  const ShaderTextureResource mip_stats_counter{{
+      0x02766800u,
+      0xc1600000u,
+      0x0167c27fu,
+      0x91800924u,
+      0x00000000u,
+      0x00700000u,
+      0x00000008u,
+      0x00000002u,
+  }};
+  auto compressed_mip_stats_counter = compressed_descriptor;
+  compressed_mip_stats_counter.fields[6] |= 0xffu;
+  Require("DepthTextureEncoding", "mip-stats counter id",
+          IsSupportedDepthTextureEncoding(mip_stats_counter) &&
+              IsSupportedDepthTextureEncoding(compressed_mip_stats_counter),
+          "depth descriptor rejected its mip-stats counter id");
+
+  // Demon's Souls samples an uncompressed depth target whose T# keeps DCC
+  // settings with compression off.
+  const ShaderTextureResource dcc_settings{{
+      0x029b8100u,
+      0xc1600000u,
+      0x00b3c13fu,
+      0x91800924u,
+      0x00000000u,
+      0x00700000u,
+      0x77c00000u,
+      0x00000003u,
+  }};
+  // Every other setting a clear COMPRESSION_EN disables.
+  auto all_dcc_settings = disabled_metadata;
+  all_dcc_settings.fields[6] |= 0x00df8000u;
+  auto msaa_depth_flag = uncompressed_msaa;
+  msaa_depth_flag.fields[6] |= 1u << 10u;
+  Require("DepthTextureEncoding", "metadata settings without compression",
+          IsSupportedDepthTextureEncoding(dcc_settings) &&
+              IsSupportedDepthTextureEncoding(all_dcc_settings) &&
+              IsSupportedDepthTextureEncoding(msaa_depth_flag),
+          "uncompressed depth rejected inactive metadata settings");
+
   const ShaderTextureResource first_use_depth{{
       0x0225fc00u, 0x01600000u, 0x00000000u, 0x91800924u,
       0x00000000u, 0x00700000u, 0x80280000u, 0x000225fdu,
@@ -51354,16 +51415,13 @@ void CheckDepthTextureEncoding() {
   dcc_only_control.fields[6] |= 1u << 22u;
   auto non_msaa_iterate_256 = compressed_descriptor;
   non_msaa_iterate_256.fields[6] |= 1u << 10u;
-  auto uncompressed_dcc_control = pipe_aligned_metadata;
-  uncompressed_dcc_control.fields[6] |= 1u << 22u;
   Require(
       "DepthTextureEncoding", "invalid HTILE encoding",
       !IsSupportedDepthTextureEncoding(missing_metadata) &&
           !IsSupportedDepthTextureEncoding(out_of_range_metadata) &&
           !IsSupportedDepthTextureEncoding(unaligned_metadata) &&
           !IsSupportedDepthTextureEncoding(dcc_only_control) &&
-          !IsSupportedDepthTextureEncoding(non_msaa_iterate_256) &&
-          !IsSupportedDepthTextureEncoding(uncompressed_dcc_control),
+          !IsSupportedDepthTextureEncoding(non_msaa_iterate_256),
       "compressed sampled depth accepted an unsupported address or control");
 
   std::printf("[host]    %-32s ok\n", "DepthTextureEncoding");
@@ -54547,6 +54605,44 @@ void CheckPm4DrawIndirectMultiPacket(RenderContext &renderer) {
   check_offsets(auto_packet, gs, {41, 7, 8}, "GPU records");
   indexed_packet[3] |= 1u << 28u;
   check_offsets(indexed_packet, gs, {17, 19, 61}, "first-index destination");
+
+  // Packets that differ only in data offsets, each drawing the record after the
+  // previous one, draw as one multi-draw; the SGPRs end as the last record's.
+  arguments = {0, 1, 2, 3, 4, 0, 1, 5, 6, 7, 0, 1, 8, 9, 10, 0, 1, 11, 12, 13};
+  std::array<uint32_t, 20> run{};
+  for (uint32_t i = 0; i < 4; i++) {
+    std::copy(indexed_packet.begin(), indexed_packet.end(),
+              run.begin() + i * 5);
+    run[i * 5 + 1] = i * 20;
+  }
+  const auto drawn = [&](std::array<uint32_t, 20> commands, uint32_t dw = 20) {
+    const auto payload_dw =
+        CpOpDrawIndirect(processor, commands[0], commands.data() + 1, dw, dw);
+    return payload_dw / 5 + 1;
+  };
+  Require("Pm4DrawIndirectMulti", "contiguous run",
+          drawn(run) == 4 &&
+              std::equal(gs + 9, gs + 12, std::array{12u, 13u, 11u}.begin()) &&
+              drawn(run, 19) == 3,
+          "a run of indirect draws was not drawn as one multi-draw");
+  auto predicated = run;
+  predicated[10] |= 1u;
+  auto other_initiator = run;
+  other_initiator[9] = 0x20;
+  auto overlapping = run;
+  overlapping[6] = 16;
+  auto gap = run;
+  gap[11] = 44;
+  // The next record past a 32-bit data offset of 0xffffffec is not at offset 0.
+  auto wrapped = run;
+  wrapped[1] = 0xffffffecu;
+  wrapped[6] = 0;
+  const bool ended = drawn(predicated) == 2 && drawn(other_initiator) == 1 &&
+                     drawn(overlapping) == 1 && drawn(gap) == 2;
+  processor.SetDrawIndirectArgsBaseAddress(
+      reinterpret_cast<uint64_t>(arguments.data()) - 0xffffffecu);
+  Require("Pm4DrawIndirectMulti", "run end", ended && drawn(wrapped) == 1,
+          "an indirect draw run took a packet that draws differently");
   processor.BufferFlush();
   std::printf("[host]    %-32s ok\n", "Pm4DrawIndirectMulti");
 }
@@ -55138,6 +55234,21 @@ void CheckPm4Flip() {
     }
     processor.BufferFlush();
   });
+
+  // A present stalled on the graphics queue leaves the port readable.
+  std::binary_semaphore queried{0};
+  int pending = -1;
+  window.graphic_ctx.queue_mutex.Lock();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  std::thread reader([&] {
+    pending = VideoOut::VideoOutIsFlipPending(handle);
+    queried.release();
+  });
+  const bool readable = queried.try_acquire_for(std::chrono::seconds(1));
+  window.graphic_ctx.queue_mutex.Unlock();
+  reader.join();
+  Require(name, "flip pending during present", readable && pending == 1,
+          "the present held the port lock");
 
   EventQueue::KernelEvent event{};
   int count = 0;
