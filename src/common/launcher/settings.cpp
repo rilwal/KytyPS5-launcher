@@ -1,5 +1,7 @@
 #include "common/launcher/settings.h"
 
+#include "common/stringUtils.h"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -28,12 +30,17 @@ struct Text {
 	std::string ConfigOptions::* field;
 };
 
+struct Folder {
+	std::filesystem::path ConfigOptions::* field;
+};
+
 struct PresentModeChoice {};
 struct Resolution {};
 struct LanguageChoice {};
+struct DlssPresetChoice {};
 
-using Kind = std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, PresentModeChoice,
-                          Resolution, LanguageChoice>;
+using Kind = std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, Folder,
+                          PresentModeChoice, Resolution, LanguageChoice, DlssPresetChoice>;
 
 struct Entry {
 	std::string_view key;
@@ -51,6 +58,10 @@ constexpr std::array<std::string_view, 3> PRESENT_MODES = {"Fifo", "Mailbox", "I
 
 constexpr std::array<std::string_view, 6> RESOLUTIONS = {"1280x720",  "1600x900",  "1920x1080",
                                                          "2560x1440", "3200x1800", "3840x2160"};
+
+// By the preset number: 0 is the model's own, then A to O as on the command line
+constexpr std::array<std::string_view, 16> DLSS_PRESETS = {
+    "Default", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"};
 
 // By the console's language number (SceSystemParamLang)
 constexpr std::array<std::string_view, Config::MAX_CONSOLE_LANGUAGE + 1> LANGUAGES = {
@@ -119,7 +130,13 @@ const std::array ENTRIES = {
            true},
     Entry {"ps5-pro", "PS5 Pro mode (experimental)", "Graphics",
            Toggle {&ConfigOptions::pro_enabled},
-           "PS5 Pro mode for games that have one (PSSR uses linear scaling)."},
+           "PS5 Pro mode for games that have one. PSSR scales linearly unless a DLSS model folder "
+           "is set."},
+    Entry {"dlss", "DLSS model folder", "Graphics", Folder {&ConfigOptions::dlss_folder},
+           "In PS5 Pro mode, upscale PSSR with the NVIDIA DLSS model in this folder instead of "
+           "linearly. Kyty doesn't include the model."},
+    Entry {"dlss-preset", "DLSS preset", "Graphics", DlssPresetChoice {},
+           "The DLSS model preset PSSR upscales with. Default is the model's own."},
     // System
     Entry {"console-language", "Console language", "System", LanguageChoice {},
            "The console's language, which games and trophy lists use."},
@@ -175,12 +192,16 @@ std::string ValueOf(const Entry& e, const ConfigOptions& cfg) {
 			    return (cfg.*kind.field != kind.inverted) ? "true" : "false";
 		    } else if constexpr (std::is_same_v<K, Text>) {
 			    return cfg.*kind.field;
+		    } else if constexpr (std::is_same_v<K, Folder>) {
+			    return Common::PathToString(cfg.*kind.field);
 		    } else if constexpr (std::is_same_v<K, PresentModeChoice>) {
 			    return std::string(PresentModeName(cfg.present_mode));
 		    } else if constexpr (std::is_same_v<K, Resolution>) {
 			    return fmt::format("{}x{}", cfg.screen_width, cfg.screen_height);
 		    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
 			    return std::string(LANGUAGES.at(cfg.console_language));
+		    } else if constexpr (std::is_same_v<K, DlssPresetChoice>) {
+			    return std::string(DLSS_PRESETS.at(cfg.dlss_preset));
 		    } else {
 			    return std::to_string(cfg.*kind.field);
 		    }
@@ -214,6 +235,10 @@ std::vector<Row> PluginRows() {
 			    } else if constexpr (std::is_same_v<K, Text>) {
 				    row.kind   = Row::Kind::Text;
 				    row.runner = true;
+			    } else if constexpr (std::is_same_v<K, Folder>) {
+				    // The shell's picker serves only the plugin's own settings
+				    row.kind   = Row::Kind::Folder;
+				    row.runner = true;
 			    } else if constexpr (std::is_same_v<K, PresentModeChoice>) {
 				    row.kind = Row::Kind::Choice;
 				    row.choices.assign(PRESENT_MODES.begin(), PRESENT_MODES.end());
@@ -223,6 +248,9 @@ std::vector<Row> PluginRows() {
 			    } else if constexpr (std::is_same_v<K, LanguageChoice>) {
 				    row.kind = Row::Kind::Choice;
 				    row.choices.assign(LANGUAGES.begin(), LANGUAGES.end());
+			    } else if constexpr (std::is_same_v<K, DlssPresetChoice>) {
+				    row.kind = Row::Kind::Choice;
+				    row.choices.assign(DLSS_PRESETS.begin(), DLSS_PRESETS.end());
 			    } else {
 				    // At most 25 steps, always with the default among them
 				    row.kind       = Row::Kind::Choice;
@@ -274,6 +302,8 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 			    cfg.*kind.field = (value == "true") != kind.inverted;
 		    } else if constexpr (std::is_same_v<K, Text>) {
 			    cfg.*kind.field = value;
+		    } else if constexpr (std::is_same_v<K, Folder>) {
+			    cfg.*kind.field = Common::PathFromUtf8(value);
 		    } else if constexpr (std::is_same_v<K, PresentModeChoice>) {
 			    const auto it = std::ranges::find(PRESENT_MODES, value);
 			    if (it == PRESENT_MODES.end()) {
@@ -303,6 +333,12 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 				    return invalid();
 			    }
 			    cfg.console_language = number;
+		    } else if constexpr (std::is_same_v<K, DlssPresetChoice>) {
+			    const auto it = std::ranges::find(DLSS_PRESETS, value);
+			    if (it == DLSS_PRESETS.end()) {
+				    return invalid();
+			    }
+			    cfg.dlss_preset = static_cast<uint32_t>(std::distance(DLSS_PRESETS.begin(), it));
 		    } else {
 			    std::remove_cvref_t<decltype(cfg.*kind.field)> number {};
 			    if (!ParseNumber(value, number) || number < kind.min || number > kind.max) {
