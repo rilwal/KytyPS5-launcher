@@ -134,6 +134,13 @@ void TestSettings() {
 	      "the default DLSS preset is the model's own");
 	Check(Launcher::Settings::Apply(cfg, "dlss-preset", "P") != "",
 	      "an unknown DLSS preset is refused");
+	Check(Launcher::Settings::Apply(cfg, "flush-draws", "250").empty() && cfg.flush_draws == 250,
+	      "a draw count per GPU submit applies, even between the offered steps");
+	Check(Launcher::Settings::Apply(cfg, "flush-draws", "100000") != "",
+	      "a draw count per GPU submit over the maximum is refused");
+	Check(Launcher::Settings::Apply(cfg, "flush-draws", std::nullopt).empty() &&
+	          cfg.flush_draws == 0,
+	      "submitting GPU work every N draws is off by default");
 	Check(Launcher::Settings::Apply(cfg, "relaxed-shader-float", "true").empty() &&
 	          cfg.relaxed_shader_float,
 	      "relaxed shader float math applies");
@@ -150,7 +157,8 @@ void TestSettings() {
 	}
 	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "relaxed-shader-float",
 	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
-	                       "emulate-psn", "console-language", "user-name", "dlss", "dlss-preset"}) {
+	                       "emulate-psn", "console-language", "user-name", "dlss", "dlss-preset",
+	                       "flush-draws"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
@@ -197,10 +205,15 @@ void TestPluginRows() {
 		Check(row.live == (row.help.find("next starts") == std::string::npos),
 		      "rows that aren't live say they wait for the next boot");
 	}
+	const auto flush =
+	    std::ranges::find(rows, std::string("flush-draws"), &Launcher::Settings::Row::key);
+	Check(flush != rows.end() && flush->choices.front() == "0" && flush->choices.back() == "5000" &&
+	          flush->choices.size() == 9,
+	      "a number with its own steps offers those");
 	const auto perf = std::ranges::find(rows, std::string("perf-overlay"), &Launcher::Settings::Row::key);
 	Check(perf != rows.end() && perf->live && !perf->runner,
 	      "the performance overlay is a live game setting");
-	for (const char* key: {"ps5-pro", "emulate-psn", "dlss", "dlss-preset"}) {
+	for (const char* key: {"ps5-pro", "emulate-psn", "dlss", "dlss-preset", "flush-draws"}) {
 		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
 		      "newer settings get a row too");
 	}

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <span>
 #include <fmt/format.h>
 #include <variant>
 
@@ -24,6 +25,7 @@ struct Number {
 	T ConfigOptions::* field;
 	T                  min;
 	T                  max;
+	std::span<const T> steps {}; // The choices offered, when even steps from min to max won't do
 };
 
 struct Text {
@@ -58,6 +60,9 @@ constexpr std::array<std::string_view, 3> PRESENT_MODES = {"Fifo", "Mailbox", "I
 
 constexpr std::array<std::string_view, 6> RESOLUTIONS = {"1280x720",  "1600x900",  "1920x1080",
                                                          "2560x1440", "3200x1800", "3840x2160"};
+
+// Draws per GPU submit worth offering; any count up to the maximum applies
+constexpr std::array<uint32_t, 9> FLUSH_DRAWS_STEPS = {0, 50, 100, 200, 300, 500, 1000, 2000, 5000};
 
 // By the preset number: 0 is the model's own, then A to O as on the command line
 constexpr std::array<std::string_view, 16> DLSS_PRESETS = {
@@ -125,6 +130,11 @@ const std::array ENTRIES = {
     Entry {"readback-storage-images", "Read back storage images", "Graphics",
            Toggle {&ConfigOptions::readback_storage_images},
            "Read back shader-written images when the game flushes the GPU cache for the CPU."},
+    Entry {"flush-draws", "Submit GPU work every N draws", "Graphics",
+           Number<uint32_t> {&ConfigOptions::flush_draws, 0, 99999, FLUSH_DRAWS_STEPS},
+           "Send the GPU work recorded so far after this many draws, so the host GPU starts before "
+           "a long command buffer ends. Can lower frame time in games that send a whole frame at "
+           "once, at some submit overhead; best set per game. 0 is off."},
     Entry {"sync-raw-image-buffers", "Synchronize raw image reads", "Graphics",
            Toggle {&ConfigOptions::sync_raw_image_buffers}, "Synchronize raw reads of GPU images.",
            true},
@@ -252,16 +262,22 @@ std::vector<Row> PluginRows() {
 				    row.kind = Row::Kind::Choice;
 				    row.choices.assign(DLSS_PRESETS.begin(), DLSS_PRESETS.end());
 			    } else {
-				    // At most 25 steps, always with the default among them
-				    row.kind       = Row::Kind::Choice;
-				    const auto lo  = static_cast<int64_t>(kind.min);
-				    const auto hi  = static_cast<int64_t>(kind.max);
-				    const auto gap = std::max<int64_t>(1, (hi - lo + 23) / 24);
-				    for (int64_t v = lo; v <= hi; v += gap) {
-					    row.choices.push_back(std::to_string(v));
-				    }
-				    if (row.choices.back() != std::to_string(hi)) {
-					    row.choices.push_back(std::to_string(hi));
+				    // The entry's own steps, else at most 25 even ones; always with the default
+				    row.kind = Row::Kind::Choice;
+				    if (!kind.steps.empty()) {
+					    for (const auto v: kind.steps) {
+						    row.choices.push_back(std::to_string(v));
+					    }
+				    } else {
+					    const auto lo  = static_cast<int64_t>(kind.min);
+					    const auto hi  = static_cast<int64_t>(kind.max);
+					    const auto gap = std::max<int64_t>(1, (hi - lo + 23) / 24);
+					    for (int64_t v = lo; v <= hi; v += gap) {
+						    row.choices.push_back(std::to_string(v));
+					    }
+					    if (row.choices.back() != std::to_string(hi)) {
+						    row.choices.push_back(std::to_string(hi));
+					    }
 				    }
 				    if (std::ranges::find(row.choices, row.default_value) == row.choices.end()) {
 					    row.choices.push_back(row.default_value);
