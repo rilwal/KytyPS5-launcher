@@ -305,6 +305,10 @@ bool SyncRawImageBuffersEnabled() {
 	return g_live.sync_raw_image_buffers.load(std::memory_order_relaxed);
 }
 
+uint32_t GetFlushDraws() {
+	return g_config->flush_draws;
+}
+
 bool TessellationEnabled() {
 	return g_live.tessellation_enabled.load(std::memory_order_relaxed);
 }
