@@ -248,6 +248,10 @@ private:
 		pick.start    = "~";
 		pick.multiple = true;
 
+		lc_path_pick folder {}; // A Folder row's; the picker says the row's label
+		folder.file  = false;
+		folder.start = "~";
+
 		lc_setting dirs {};
 		dirs.key           = GAME_DIRS_KEY;
 		dirs.section       = "Games";
@@ -274,6 +278,10 @@ private:
 			switch (row.kind) {
 				case Settings::Row::Kind::Toggle: s.kind = LC_SETTING_TOGGLE; break;
 				case Settings::Row::Kind::Text: s.kind = LC_SETTING_TEXT; break;
+				case Settings::Row::Kind::Folder:
+					s.kind = LC_SETTING_PATH;
+					s.path = &folder;
+					break;
 				case Settings::Row::Kind::Choice:
 					s.kind = LC_SETTING_CHOICE;
 					for (const auto& c: row.choices) {

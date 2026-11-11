@@ -123,6 +123,17 @@ void TestSettings() {
 	      "an unknown console language is refused");
 	Check(Launcher::Settings::Apply(cfg, "ps5-pro", "true").empty() && cfg.pro_enabled,
 	      "PS5 Pro mode applies");
+	Check(Launcher::Settings::Apply(cfg, "dlss", "/models/dlss").empty() &&
+	          cfg.dlss_folder == std::filesystem::path("/models/dlss"),
+	      "a DLSS model folder applies");
+	Check(Launcher::Settings::Apply(cfg, "dlss", std::nullopt).empty() && cfg.dlss_folder.empty(),
+	      "no DLSS model folder is the default");
+	Check(Launcher::Settings::Apply(cfg, "dlss-preset", "K").empty() && cfg.dlss_preset == 11,
+	      "a DLSS preset applies by letter, as on the command line");
+	Check(Launcher::Settings::Apply(cfg, "dlss-preset", "Default").empty() && cfg.dlss_preset == 0,
+	      "the default DLSS preset is the model's own");
+	Check(Launcher::Settings::Apply(cfg, "dlss-preset", "P") != "",
+	      "an unknown DLSS preset is refused");
 	Check(Launcher::Settings::Apply(cfg, "relaxed-shader-float", "true").empty() &&
 	          cfg.relaxed_shader_float,
 	      "relaxed shader float math applies");
@@ -139,7 +150,7 @@ void TestSettings() {
 	}
 	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "relaxed-shader-float",
 	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
-	                       "emulate-psn", "console-language", "user-name"}) {
+	                       "emulate-psn", "console-language", "user-name", "dlss", "dlss-preset"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
@@ -175,9 +186,11 @@ void TestPluginRows() {
 	const auto rows = Launcher::Settings::PluginRows();
 	Check(rows.front().key == "resolution", "every setting, in order");
 	for (const auto& row: rows) {
-		const bool own = row.key == "user-name" || row.key == "console-language";
-		Check(row.runner == own, "only text and the trophy language are the plugin's own settings");
-		Check(row.runner || row.kind != Launcher::Settings::Row::Kind::Text,
+		const bool own = row.key == "user-name" || row.key == "console-language" || row.key == "dlss";
+		Check(row.runner == own,
+		      "only text, folders and the trophy language are the plugin's own settings");
+		Check(row.runner || (row.kind != Launcher::Settings::Row::Kind::Text &&
+		                     row.kind != Launcher::Settings::Row::Kind::Folder),
 		      "game settings are toggles and choices");
 		Check(row.live == Launcher::Settings::IsLive(row.key), "rows say whether they're live");
 		Check(!row.help.empty(), "every row says what it does");
@@ -187,7 +200,7 @@ void TestPluginRows() {
 	const auto perf = std::ranges::find(rows, std::string("perf-overlay"), &Launcher::Settings::Row::key);
 	Check(perf != rows.end() && perf->live && !perf->runner,
 	      "the performance overlay is a live game setting");
-	for (const char* key: {"ps5-pro", "emulate-psn"}) {
+	for (const char* key: {"ps5-pro", "emulate-psn", "dlss", "dlss-preset"}) {
 		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
 		      "newer settings get a row too");
 	}
