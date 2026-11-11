@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <span>
 #include <fmt/format.h>
+#include <span>
 #include <variant>
 
 namespace Common::Launcher::Settings {
