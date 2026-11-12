@@ -42,9 +42,9 @@ struct LanguageChoice {};
 struct DlssPresetChoice {};
 struct PssrUpscalerChoice {};
 
-using Kind = std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, Folder,
-                          PresentModeChoice, Resolution, LanguageChoice, DlssPresetChoice,
-                          PssrUpscalerChoice>;
+using Kind =
+    std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, Folder, PresentModeChoice,
+                 Resolution, LanguageChoice, DlssPresetChoice, PssrUpscalerChoice>;
 
 struct Entry {
 	std::string_view key;
