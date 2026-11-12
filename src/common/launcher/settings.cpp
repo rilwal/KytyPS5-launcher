@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <fmt/format.h>
 #include <span>
@@ -70,11 +71,9 @@ constexpr std::array<uint32_t, 9> FLUSH_DRAWS_STEPS = {0, 50, 100, 200, 300, 500
 constexpr std::array<std::string_view, 3> PSSR_UPSCALERS = {"Linear", "DLSS", "FSR"};
 
 // The upscalers this build can load, as upstream's own launcher offers them: FidelityFX ships as
-// Windows DLLs, and DLSS has no macOS build
+// Windows DLLs, and DLSS has no macOS build, so macOS, with only Linear, gets no row
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 constexpr std::array<std::string_view, 3> OFFERED_PSSR_UPSCALERS = {"Linear", "DLSS", "FSR"};
-#elif defined(__APPLE__)
-constexpr std::array<std::string_view, 1> OFFERED_PSSR_UPSCALERS = {"Linear"};
 #else
 constexpr std::array<std::string_view, 2> OFFERED_PSSR_UPSCALERS = {"Linear", "DLSS"};
 #endif
@@ -156,6 +155,11 @@ const std::array ENTRIES = {
     Entry {"sync-raw-image-buffers", "Synchronize raw image reads", "Graphics",
            Toggle {&ConfigOptions::sync_raw_image_buffers}, "Synchronize raw reads of GPU images.",
            true},
+#if defined(__APPLE__)
+    Entry {"ps5-pro", "PS5 Pro mode (experimental)", "Graphics",
+           Toggle {&ConfigOptions::pro_enabled},
+           "PS5 Pro mode for games that have one (PSSR scales linearly)."},
+#else
     Entry {"ps5-pro", "PS5 Pro mode (experimental)", "Graphics",
            Toggle {&ConfigOptions::pro_enabled},
            "PS5 Pro mode for games that have one. The PSSR upscaler setting picks how PSSR "
@@ -163,7 +167,6 @@ const std::array ENTRIES = {
     Entry {"pssr-upscaler", "PSSR upscaler", "Graphics", PssrUpscalerChoice {},
            "In PS5 Pro mode, what upscales PSSR: Linear scaling, or a DLSS or FSR model from the "
            "folder set for it."},
-#if !defined(__APPLE__)
     Entry {"dlss-folder", "DLSS model folder", "Graphics", Folder {&ConfigOptions::dlss_folder},
            "The folder of the NVIDIA DLSS model the DLSS PSSR upscaler uses. Kyty doesn't include "
            "it."},
@@ -390,9 +393,14 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 			    }
 			    cfg.dlss_preset = static_cast<uint32_t>(std::distance(DLSS_PRESETS.begin(), it));
 		    } else if constexpr (std::is_same_v<K, PssrUpscalerChoice>) {
-			    // Any of them, as on the command line; an upscaler this build can't load falls back
-			    // to Linear when the game starts
-			    const auto it = std::ranges::find(PSSR_UPSCALERS, value);
+			    // Any of them, in any case, as on the command line; an upscaler this build can't
+			    // load falls back to Linear when the game starts
+			    const auto it = std::ranges::find_if(PSSR_UPSCALERS, [&](std::string_view name) {
+				    return std::ranges::equal(name, value, [](char a, char b) {
+					    return std::tolower(static_cast<unsigned char>(a)) ==
+					           std::tolower(static_cast<unsigned char>(b));
+				    });
+			    });
 			    if (it == PSSR_UPSCALERS.end()) {
 				    return invalid();
 			    }

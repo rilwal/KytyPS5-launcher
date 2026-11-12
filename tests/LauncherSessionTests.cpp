@@ -123,17 +123,20 @@ void TestSettings() {
 	      "an unknown console language is refused");
 	Check(Launcher::Settings::Apply(cfg, "ps5-pro", "true").empty() && cfg.pro_enabled,
 	      "PS5 Pro mode applies");
+	Check(Launcher::Settings::Apply(cfg, "native-rt", "true").empty() && cfg.native_rt,
+	      "native ray tracing applies");
+#if !defined(__APPLE__)
 	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", "FSR").empty() &&
 	          cfg.pssr_upscaler == Config::PssrUpscaler::FSR,
 	      "any PSSR upscaler applies, as on the command line");
 	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", std::nullopt).empty() &&
 	          cfg.pssr_upscaler == Config::PssrUpscaler::Linear,
 	      "PSSR scales linearly by default");
+	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", "dlss").empty() &&
+	          cfg.pssr_upscaler == Config::PssrUpscaler::DLSS,
+	      "a PSSR upscaler applies in any case, as on the command line");
 	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", "Bicubic") != "",
 	      "an unknown PSSR upscaler is refused");
-	Check(Launcher::Settings::Apply(cfg, "native-rt", "true").empty() && cfg.native_rt,
-	      "native ray tracing applies");
-#if !defined(__APPLE__)
 	Check(Launcher::Settings::Apply(cfg, "dlss-folder", "/models/dlss").empty() &&
 	          cfg.dlss_folder == std::filesystem::path("/models/dlss"),
 	      "a DLSS model folder applies");
@@ -233,7 +236,7 @@ void TestPluginRows() {
 	const auto perf = std::ranges::find(rows, std::string("perf-overlay"), &Launcher::Settings::Row::key);
 	Check(perf != rows.end() && perf->live && !perf->runner,
 	      "the performance overlay is a live game setting");
-	for (const char* key: {"ps5-pro", "emulate-psn", "flush-draws", "pssr-upscaler", "native-rt"}) {
+	for (const char* key: {"ps5-pro", "emulate-psn", "flush-draws", "native-rt"}) {
 		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
 		      "newer settings get a row too");
 	}
@@ -241,10 +244,11 @@ void TestPluginRows() {
 		return std::ranges::find(rows, key, &Launcher::Settings::Row::key) != rows.end();
 	};
 #if defined(__APPLE__)
-	Check(!has_row("dlss-folder") && !has_row("dlss-preset"),
-	      "DLSS has no rows where it can't load");
+	Check(!has_row("pssr-upscaler") && !has_row("dlss-folder") && !has_row("dlss-preset"),
+	      "PSSR upscalers and DLSS have no rows where only Linear can load");
 #else
-	Check(has_row("dlss-folder") && has_row("dlss-preset"), "DLSS has rows where it can load");
+	Check(has_row("pssr-upscaler") && has_row("dlss-folder") && has_row("dlss-preset"),
+	      "PSSR upscalers and DLSS have rows where DLSS can load");
 #endif
 	Check(has_row("fsr-folder") == (KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS),
 	      "the FidelityFX folder has a row on Windows only");
