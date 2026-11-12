@@ -40,9 +40,11 @@ struct PresentModeChoice {};
 struct Resolution {};
 struct LanguageChoice {};
 struct DlssPresetChoice {};
+struct PssrUpscalerChoice {};
 
 using Kind = std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, Folder,
-                          PresentModeChoice, Resolution, LanguageChoice, DlssPresetChoice>;
+                          PresentModeChoice, Resolution, LanguageChoice, DlssPresetChoice,
+                          PssrUpscalerChoice>;
 
 struct Entry {
 	std::string_view key;
@@ -63,6 +65,19 @@ constexpr std::array<std::string_view, 6> RESOLUTIONS = {"1280x720",  "1600x900"
 
 // Draws per GPU submit worth offering; any count up to the maximum applies
 constexpr std::array<uint32_t, 9> FLUSH_DRAWS_STEPS = {0, 50, 100, 200, 300, 500, 1000, 2000, 5000};
+
+// By Config::PssrUpscaler, as on the command line
+constexpr std::array<std::string_view, 3> PSSR_UPSCALERS = {"Linear", "DLSS", "FSR"};
+
+// The upscalers this build can load, as upstream's own launcher offers them: FidelityFX ships as
+// Windows DLLs, and DLSS has no macOS build
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+constexpr std::array<std::string_view, 3> OFFERED_PSSR_UPSCALERS = {"Linear", "DLSS", "FSR"};
+#elif defined(__APPLE__)
+constexpr std::array<std::string_view, 1> OFFERED_PSSR_UPSCALERS = {"Linear"};
+#else
+constexpr std::array<std::string_view, 2> OFFERED_PSSR_UPSCALERS = {"Linear", "DLSS"};
+#endif
 
 // By the preset number: 0 is the model's own, then A to O as on the command line
 constexpr std::array<std::string_view, 16> DLSS_PRESETS = {
@@ -115,6 +130,9 @@ const std::array ENTRIES = {
     Entry {"relaxed-shader-float", "Relaxed shader float math", "Graphics",
            Toggle {&ConfigOptions::relaxed_shader_float},
            "Use the host GPU's native float operations in shaders. Faster, but can be inaccurate."},
+    Entry {"native-rt", "Native ray tracing", "Graphics", Toggle {&ConfigOptions::native_rt},
+           "Mirror the game's ray tracing structures into the host GPU's own and trace rays with "
+           "its ray queries, when it has them."},
     Entry {"tessellation", "Tessellation", "Graphics",
            Toggle {&ConfigOptions::tessellation_enabled},
            "Draw tessellation patches, which are skipped when off.", true},
@@ -140,13 +158,23 @@ const std::array ENTRIES = {
            true},
     Entry {"ps5-pro", "PS5 Pro mode (experimental)", "Graphics",
            Toggle {&ConfigOptions::pro_enabled},
-           "PS5 Pro mode for games that have one. PSSR scales linearly unless a DLSS model folder "
-           "is set."},
-    Entry {"dlss", "DLSS model folder", "Graphics", Folder {&ConfigOptions::dlss_folder},
-           "In PS5 Pro mode, upscale PSSR with the NVIDIA DLSS model in this folder instead of "
-           "linearly. Kyty doesn't include the model."},
+           "PS5 Pro mode for games that have one. The PSSR upscaler setting picks how PSSR "
+           "scales."},
+    Entry {"pssr-upscaler", "PSSR upscaler", "Graphics", PssrUpscalerChoice {},
+           "In PS5 Pro mode, what upscales PSSR: Linear scaling, or a DLSS or FSR model from the "
+           "folder set for it."},
+#if !defined(__APPLE__)
+    Entry {"dlss-folder", "DLSS model folder", "Graphics", Folder {&ConfigOptions::dlss_folder},
+           "The folder of the NVIDIA DLSS model the DLSS PSSR upscaler uses. Kyty doesn't include "
+           "it."},
     Entry {"dlss-preset", "DLSS preset", "Graphics", DlssPresetChoice {},
            "The DLSS model preset PSSR upscales with. Default is the model's own."},
+#endif
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    Entry {"fsr-folder", "FidelityFX folder", "Graphics", Folder {&ConfigOptions::fsr_folder},
+           "The folder of the AMD FidelityFX DLLs the FSR PSSR upscaler uses. Kyty doesn't include "
+           "them."},
+#endif
     // System
     Entry {"console-language", "Console language", "System", LanguageChoice {},
            "The console's language, which games and trophy lists use."},
@@ -212,6 +240,8 @@ std::string ValueOf(const Entry& e, const ConfigOptions& cfg) {
 			    return std::string(LANGUAGES.at(cfg.console_language));
 		    } else if constexpr (std::is_same_v<K, DlssPresetChoice>) {
 			    return std::string(DLSS_PRESETS.at(cfg.dlss_preset));
+		    } else if constexpr (std::is_same_v<K, PssrUpscalerChoice>) {
+			    return std::string(PSSR_UPSCALERS.at(static_cast<size_t>(cfg.pssr_upscaler)));
 		    } else {
 			    return std::to_string(cfg.*kind.field);
 		    }
@@ -261,6 +291,10 @@ std::vector<Row> PluginRows() {
 			    } else if constexpr (std::is_same_v<K, DlssPresetChoice>) {
 				    row.kind = Row::Kind::Choice;
 				    row.choices.assign(DLSS_PRESETS.begin(), DLSS_PRESETS.end());
+			    } else if constexpr (std::is_same_v<K, PssrUpscalerChoice>) {
+				    row.kind = Row::Kind::Choice;
+				    row.choices.assign(OFFERED_PSSR_UPSCALERS.begin(),
+				                       OFFERED_PSSR_UPSCALERS.end());
 			    } else {
 				    // The entry's own steps, else at most 25 even ones; always with the default
 				    row.kind = Row::Kind::Choice;
@@ -355,6 +389,15 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 				    return invalid();
 			    }
 			    cfg.dlss_preset = static_cast<uint32_t>(std::distance(DLSS_PRESETS.begin(), it));
+		    } else if constexpr (std::is_same_v<K, PssrUpscalerChoice>) {
+			    // Any of them, as on the command line; an upscaler this build can't load falls back
+			    // to Linear when the game starts
+			    const auto it = std::ranges::find(PSSR_UPSCALERS, value);
+			    if (it == PSSR_UPSCALERS.end()) {
+				    return invalid();
+			    }
+			    cfg.pssr_upscaler =
+			        static_cast<Config::PssrUpscaler>(std::distance(PSSR_UPSCALERS.begin(), it));
 		    } else {
 			    std::remove_cvref_t<decltype(cfg.*kind.field)> number {};
 			    if (!ParseNumber(value, number) || number < kind.min || number > kind.max) {

@@ -123,10 +123,22 @@ void TestSettings() {
 	      "an unknown console language is refused");
 	Check(Launcher::Settings::Apply(cfg, "ps5-pro", "true").empty() && cfg.pro_enabled,
 	      "PS5 Pro mode applies");
-	Check(Launcher::Settings::Apply(cfg, "dlss", "/models/dlss").empty() &&
+	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", "FSR").empty() &&
+	          cfg.pssr_upscaler == Config::PssrUpscaler::FSR,
+	      "any PSSR upscaler applies, as on the command line");
+	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", std::nullopt).empty() &&
+	          cfg.pssr_upscaler == Config::PssrUpscaler::Linear,
+	      "PSSR scales linearly by default");
+	Check(Launcher::Settings::Apply(cfg, "pssr-upscaler", "Bicubic") != "",
+	      "an unknown PSSR upscaler is refused");
+	Check(Launcher::Settings::Apply(cfg, "native-rt", "true").empty() && cfg.native_rt,
+	      "native ray tracing applies");
+#if !defined(__APPLE__)
+	Check(Launcher::Settings::Apply(cfg, "dlss-folder", "/models/dlss").empty() &&
 	          cfg.dlss_folder == std::filesystem::path("/models/dlss"),
 	      "a DLSS model folder applies");
-	Check(Launcher::Settings::Apply(cfg, "dlss", std::nullopt).empty() && cfg.dlss_folder.empty(),
+	Check(Launcher::Settings::Apply(cfg, "dlss-folder", std::nullopt).empty() &&
+	          cfg.dlss_folder.empty(),
 	      "no DLSS model folder is the default");
 	Check(Launcher::Settings::Apply(cfg, "dlss-preset", "K").empty() && cfg.dlss_preset == 11,
 	      "a DLSS preset applies by letter, as on the command line");
@@ -134,6 +146,12 @@ void TestSettings() {
 	      "the default DLSS preset is the model's own");
 	Check(Launcher::Settings::Apply(cfg, "dlss-preset", "P") != "",
 	      "an unknown DLSS preset is refused");
+#endif
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	Check(Launcher::Settings::Apply(cfg, "fsr-folder", "C:/FidelityFX").empty() &&
+	          cfg.fsr_folder == std::filesystem::path("C:/FidelityFX"),
+	      "a FidelityFX folder applies");
+#endif
 	Check(Launcher::Settings::Apply(cfg, "flush-draws", "250").empty() && cfg.flush_draws == 250,
 	      "a draw count per GPU submit applies, even between the offered steps");
 	Check(Launcher::Settings::Apply(cfg, "flush-draws", "100000") != "",
@@ -157,8 +175,9 @@ void TestSettings() {
 	}
 	for (const char* key: {"hdr", "ps5-pro", "gpu", "splash", "shader-cache", "relaxed-shader-float",
 	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
-	                       "emulate-psn", "console-language", "user-name", "dlss", "dlss-preset",
-	                       "flush-draws"}) {
+	                       "emulate-psn", "console-language", "user-name", "flush-draws",
+	                       "pssr-upscaler", "native-rt", "dlss-folder", "dlss-preset",
+	                       "fsr-folder"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
@@ -194,7 +213,8 @@ void TestPluginRows() {
 	const auto rows = Launcher::Settings::PluginRows();
 	Check(rows.front().key == "resolution", "every setting, in order");
 	for (const auto& row: rows) {
-		const bool own = row.key == "user-name" || row.key == "console-language" || row.key == "dlss";
+		const bool own = row.key == "user-name" || row.key == "console-language" ||
+		                 row.key == "dlss-folder" || row.key == "fsr-folder";
 		Check(row.runner == own,
 		      "only text, folders and the trophy language are the plugin's own settings");
 		Check(row.runner || (row.kind != Launcher::Settings::Row::Kind::Text &&
@@ -213,10 +233,21 @@ void TestPluginRows() {
 	const auto perf = std::ranges::find(rows, std::string("perf-overlay"), &Launcher::Settings::Row::key);
 	Check(perf != rows.end() && perf->live && !perf->runner,
 	      "the performance overlay is a live game setting");
-	for (const char* key: {"ps5-pro", "emulate-psn", "dlss", "dlss-preset", "flush-draws"}) {
+	for (const char* key: {"ps5-pro", "emulate-psn", "flush-draws", "pssr-upscaler", "native-rt"}) {
 		Check(std::ranges::find(rows, std::string(key), &Launcher::Settings::Row::key) != rows.end(),
 		      "newer settings get a row too");
 	}
+	const auto has_row = [&](std::string_view key) {
+		return std::ranges::find(rows, key, &Launcher::Settings::Row::key) != rows.end();
+	};
+#if defined(__APPLE__)
+	Check(!has_row("dlss-folder") && !has_row("dlss-preset"),
+	      "DLSS has no rows where it can't load");
+#else
+	Check(has_row("dlss-folder") && has_row("dlss-preset"), "DLSS has rows where it can load");
+#endif
+	Check(has_row("fsr-folder") == (KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS),
+	      "the FidelityFX folder has a row on Windows only");
 	for (const auto& row: rows) {
 		Config::ConfigOptions cfg;
 		Check(Launcher::Settings::Apply(cfg, row.key, row.default_value).empty(),
