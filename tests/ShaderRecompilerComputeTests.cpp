@@ -107,6 +107,7 @@
 #include <string_view>
 #include <tuple>
 #include <vector>
+#include <xxhash.h>
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 #include <cerrno>
@@ -214,18 +215,40 @@ struct BufferCacheTestAccess {
   }
 };
 
-// Counts the vkCmdPipelineBarrier and vkCmdCopyBuffer calls recorded while it lives.
+// Counts the vkCmdPipelineBarrier and vkCmdCopyBuffer calls recorded while it lives, and the
+// barriers whose only destination stage is indirect argument reads, and keeps the last vertex
+// buffer bindings.
 struct RecordedCommandCounter {
+  struct VertexBuffers {
+    std::vector<VkBuffer> buffers;
+    std::vector<VkDeviceSize> offsets;
+    std::vector<VkDeviceSize> sizes;
+  };
   static inline uint32_t barriers = 0;
+  static inline uint32_t indirect_barriers = 0;
   static inline uint32_t copies = 0;
+  static inline VertexBuffers vertex_buffers;
   static inline PFN_vkCmdPipelineBarrier pipeline_barrier = nullptr;
   static inline PFN_vkCmdCopyBuffer copy_buffer = nullptr;
+  static inline PFN_vkCmdBindVertexBuffers2 bind_vertex_buffers = nullptr;
 
   RecordedCommandCounter() {
     auto &dispatcher = VULKAN_HPP_DEFAULT_DISPATCHER;
-    barriers = copies = 0;
+    barriers = indirect_barriers = copies = 0;
+    vertex_buffers = {};
+    bind_vertex_buffers = std::exchange(
+        dispatcher.vkCmdBindVertexBuffers2,
+        [](VkCommandBuffer command, uint32_t first, uint32_t count, const VkBuffer *buffers,
+           const VkDeviceSize *offsets, const VkDeviceSize *sizes,
+           const VkDeviceSize *strides) {
+          vertex_buffers = {{buffers, buffers + count},
+                            {offsets, offsets + count},
+                            {sizes, sizes + count}};
+          bind_vertex_buffers(command, first, count, buffers, offsets, sizes, strides);
+        });
     pipeline_barrier = std::exchange(dispatcher.vkCmdPipelineBarrier, [](auto... args) {
       ++barriers;
+      indirect_barriers += std::get<2>(std::tie(args...)) == VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
       pipeline_barrier(args...);
     });
     copy_buffer = std::exchange(dispatcher.vkCmdCopyBuffer, [](auto... args) {
@@ -236,6 +259,26 @@ struct RecordedCommandCounter {
   ~RecordedCommandCounter() {
     VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPipelineBarrier = pipeline_barrier;
     VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdCopyBuffer = copy_buffer;
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindVertexBuffers2 = bind_vertex_buffers;
+  }
+};
+
+struct RayTracingTestAccess {
+  static vk::DeviceAddress Triangles(const RayTracing &mirror, uint32_t blas) {
+    return mirror.m_blases[blas].triangles->BufferDeviceAddress();
+  }
+  // TLASes, pairs, BLASes and readbacks in flight.
+  static std::array<size_t, 4> Counts(const RayTracing &mirror) {
+    const auto busy = std::ranges::count_if(
+        mirror.m_areas, [](const auto &area) { return area.tick != 0; });
+    return {mirror.m_tlases.size(), mirror.m_pairs.size(),
+            mirror.m_blases.size(), static_cast<size_t>(busy)};
+  }
+  // Runs suspend points up to the next eviction pass.
+  static void Evict(RayTracing &mirror) {
+    for (uint32_t frame = 0; frame < RayTracing::EvictFrames; ++frame) {
+      mirror.RunGarbageCollector();
+    }
   }
 };
 
@@ -1427,8 +1470,6 @@ void CheckLeastRecentlyUsedCacheOrdering() {
 struct BdaMapping {
   uint64_t guest_base = 0;
   u32 backing_offset = 0;
-  // Loads from an unaccessed mapping must record its first page.
-  bool accessed = true;
 };
 
 using ShaderProfile = ShaderRecompiler::Spirv::Profile;
@@ -1484,6 +1525,8 @@ struct TestCase {
   std::vector<std::pair<u32, u32>> storage_buffer_ranges;
   std::vector<BdaMapping> bda_mappings;
   std::optional<uint64_t> fault_free_address;
+  // A BDA load from this unbacked address must record its page.
+  std::optional<uint64_t> fault_address;
   bool expand_shader_data_storage = false;
   bool expected_force_point_sampler = false;
   float expected_float_tolerance = 0.0f;
@@ -6609,7 +6652,7 @@ public:
     context.MapMemory(base + 2 * page, page);
     const auto id = cache.FindBuffer(base, 3 * page);
     auto &buffer = cache.GetBuffer(id);
-    auto readback = CreateHostBuffer(name, 11 * sizeof(u32),
+    auto readback = CreateHostBuffer(name, 9 * sizeof(u32),
                                      vk::BufferUsageFlagBits::eTransferDst, {});
     const auto snapshot_of = [&](const auto &source, uint64_t offset, uint32_t index) {
       const vk::BufferCopy copy{offset, index * sizeof(u32), sizeof(u32)};
@@ -6632,21 +6675,6 @@ public:
             "BDA upload missed a mapped range or uploaded an unmapped hole");
     snapshot(0, 0);
     snapshot(2 * page, 1);
-
-    // A write queues a page only once a DMA access reported it; the report queues it too.
-    cache.InvalidateMemory(base + 17, 1);
-    context.PrepareBda();
-    Require(name, "unaccessed write", cache.IsRegionCpuModified(base, TRACKER_PAGE_SIZE),
-            "a write queued a page no DMA shader accessed");
-    cache.GetFaultBuffer()->Fill(BufferCache::PageIndex(base) / 32 * 4, 4,
-                                 1u << (BufferCache::PageIndex(base) % 32));
-    cache.ProcessFaultBuffer();
-    scheduler.Finish();
-    context.PrepareBda();
-    Require(name, "accessed page", !cache.IsRegionCpuModified(base, TRACKER_PAGE_SIZE),
-            "a DMA access report did not queue its page");
-    const auto tagged_entry = static_cast<u32>(buffer.BufferDeviceAddress() | BufferCache::BDA_ACCESSED);
-    snapshot_of(*cache.GetBdaPageTableBuffer(), BufferCache::PageIndex(base) * sizeof(uint64_t), 8);
 
     cache.InvalidateMemory(base + 17, 1);
     words[4] = 0x87654321u;
@@ -6707,10 +6735,22 @@ public:
             "buffers replacing an evicted one did not upload their untracked pages");
     snapshot_of(cache.GetBuffer(low), 16, 6);
     snapshot_of(cache.GetBuffer(high), page, 7);
-    // Registration re-tags only the accessed page.
-    snapshot_of(*cache.GetBdaPageTableBuffer(), BufferCache::PageIndex(base) * sizeof(uint64_t), 9);
-    snapshot_of(*cache.GetBdaPageTableBuffer(),
-                BufferCache::PageIndex(base + page) * sizeof(uint64_t), 10);
+
+    // Every write fault queues its page, however often the CPU rewrites it.
+    BufferCacheTestAccess::SetGarbageCollectionThresholds(
+        cache, std::numeric_limits<uint64_t>::max(),
+        std::numeric_limits<uint64_t>::max());
+    for (u32 interval = 0; interval < 8; ++interval) {
+      cache.RunGarbageCollector();
+      cache.InvalidateMemory(base + 8, 1);
+      words[2] = interval;
+      context.PrepareBda();
+      Require(
+          name, "repeated writes",
+          !cache.IsRegionCpuModified(base, TRACKER_PAGE_SIZE),
+          "a write fault on a page the CPU keeps rewriting was not uploaded");
+    }
+    snapshot_of(cache.GetBuffer(low), 8, 8);
 
     vk::BufferMemoryBarrier barrier{};
     barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
@@ -6721,13 +6761,13 @@ public:
     scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
         vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
     scheduler.Finish();
-    Require(name, "GPU contents", ReadBuffer(name, readback, 11) ==
-        std::vector<u32>{0x12345678u, 0x12345678u, 0x87654321u, 0xabcdef01u,
-                        0x12345678u, 0xfedcba98u, 0x87654321u, 0xfedcba98u, tagged_entry,
-                        static_cast<u32>(cache.GetBuffer(low).BufferDeviceAddress() |
-                                         BufferCache::BDA_ACCESSED),
-                        static_cast<u32>(cache.GetBuffer(high).BufferDeviceAddress())},
-        "stale bytes on the GPU, or page-table entries with wrong accessed tags");
+    Require(name, "GPU contents",
+            ReadBuffer(name, readback, 9) ==
+                std::vector<u32>{0x12345678u, 0x12345678u, 0x87654321u,
+                                 0xabcdef01u, 0x12345678u, 0xfedcba98u,
+                                 0x87654321u, 0xfedcba98u, 7u},
+            "initial, re-dirtied, rewritten, newly mapped, remapped or "
+            "replacement bytes were stale on the GPU");
     context.UnmapMemory(base, 3 * page);
     scheduler.Finish();
     DestroyBuffer(&readback);
@@ -8159,10 +8199,9 @@ public:
                   native_volume.backing.state.access_mask ==
                       vk::AccessFlagBits2::eTransferRead &&
                   native_array.backing.state.layout ==
-                      vk::ImageLayout::eGeneral &&
+                      vk::ImageLayout::eTransferDstOptimal &&
                   native_array.backing.state.access_mask ==
-                      (vk::AccessFlagBits2::eShaderRead |
-                       vk::AccessFlagBits2::eTransferRead),
+                      vk::AccessFlagBits2::eTransferWrite,
               "Image::CopyImage did not retain pinned "
               "source/destination states");
 
@@ -8983,6 +9022,10 @@ public:
       fault_b_desc.info.data.address = base + 0x8010;
       const auto fault_a_image = texture_cache.FindImage(fault_a_desc);
       const auto fault_b_image = texture_cache.FindImage(fault_b_desc);
+      Require(name, "guest edge hash",
+              texture_cache.GetImage(fault_a_image).HashGuestEdges() ==
+                  XXH3_64bits(&fault_a, sizeof(fault_a)),
+              "the edge hash covered bytes outside the image");
       (void)texture_cache.FindTexture(fault_a_image, fault_a_desc);
       (void)texture_cache.FindTexture(fault_b_image, fault_b_desc);
       texture_cache.MarkGpuWritten(fault_a_image);
@@ -13059,6 +13102,7 @@ public:
                              .wave_size = 64, .user_sgpr = 4, .tgid_x_en = true});
         set_buffer(0, output, 16u * sizeof(u32));
         const auto tick = scheduler.CurrentTick();
+        const RecordedCommandCounter counter;
         if (test.transfer) {
           const std::array<u32, 3> packet{static_cast<u32>(args),
                                          static_cast<u32>(args >> 32u), test.mode};
@@ -13073,6 +13117,9 @@ public:
                   CpOpDispatchIndirect(processor, 0xc0011600u, packet.data(), 0, 0) == 2,
                   "the offset indirect packet was not consumed");
         }
+        // The writers' trailing barriers already cover indirect argument reads.
+        Require(name, "no argument barrier", RecordedCommandCounter::indirect_barriers == 0,
+                "the indirect dispatch recorded its own argument barrier");
         if (test.mode == 0x41u) {
           Require(name, "asynchronous indirect dispatch", scheduler.CurrentTick() == tick,
                   "workgroup-count arguments caused a host submission or readback");
@@ -20056,7 +20103,7 @@ public:
       cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                           vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr,
                           1, barriers.data(), 0, nullptr);
-      for (const auto &[guest_base, backing, accessed] : test.bda_mappings) {
+      for (const auto &[guest_base, backing] : test.bda_mappings) {
         const auto page_offset = guest_base &
                                  (BufferCache::CACHING_PAGESIZE - 1);
         Require(test.name, "dispatch",
@@ -20066,8 +20113,7 @@ public:
         const auto pages =
             (bytes + BufferCache::CACHING_PAGESIZE - 1) /
             BufferCache::CACHING_PAGESIZE;
-        auto address = buffer.device_address + backing - page_offset +
-                       (accessed ? BufferCache::BDA_ACCESSED : 0);
+        auto address = buffer.device_address + backing - page_offset;
         auto page = BufferCache::PageIndex(guest_base);
         for (uint64_t mapped = 0; mapped < pages; mapped++) {
           cmd.updateBuffer(m_bda_pagetable_buffer.buffer,
@@ -20125,14 +20171,8 @@ public:
                           &barrier, 0, nullptr);
     }
     Buffer fault_result;
-    auto fault_address = test.fault_free_address;
-    u32 expected_fault = 0;
-    for (const auto &mapping : test.bda_mappings) {
-      if (!mapping.accessed) {
-        fault_address = mapping.guest_base;
-        expected_fault = 1u << (BufferCache::PageIndex(mapping.guest_base) & 31u);
-      }
-    }
+    const auto fault_address =
+        test.fault_address ? test.fault_address : test.fault_free_address;
     if (fault_address) {
       Require(test.name, "fault check", uses_bda, "fault check requires BDA");
       fault_result = CreateHostBuffer(test.name, sizeof(u32),
@@ -20142,8 +20182,9 @@ public:
           .dstAccessMask = vk::AccessFlagBits::eTransferRead};
       cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
                           vk::PipelineStageFlagBits::eTransfer, {}, 1, &ready, 0, nullptr, 0, nullptr);
-      const vk::BufferCopy region{(BufferCache::PageIndex(*fault_address) >> 5u) * sizeof(u32),
-                                   0, sizeof(u32)};
+      const vk::BufferCopy region{
+          (BufferCache::PageIndex(*fault_address) >> 5u) * sizeof(u32), 0,
+          sizeof(u32)};
       cmd.copyBuffer(m_fault_buffer.buffer, fault_result.buffer, 1, &region);
       const vk::MemoryBarrier readable{.srcAccessMask = vk::AccessFlagBits::eTransferWrite,
                                         .dstAccessMask = vk::AccessFlagBits::eHostRead};
@@ -20152,8 +20193,13 @@ public:
     }
     EndSubmitAndFree(test.name, "dispatch", cmd);
     if (fault_address) {
-      Require(test.name, "fault check", ReadBuffer(test.name, fault_result, 1)[0] == expected_fault,
-              "an access recorded a suppressed or accessed page, or missed an unaccessed one");
+      const u32 expected_fault =
+          test.fault_address
+              ? 1u << (BufferCache::PageIndex(*test.fault_address) & 31u)
+              : 0u;
+      Require(test.name, "fault check",
+              ReadBuffer(test.name, fault_result, 1)[0] == expected_fault,
+              "an access recorded a suppressed page or missed an unbacked one");
       DestroyBuffer(&fault_result);
     }
     for (const auto view : sampled_mip_views) {
@@ -21534,6 +21580,74 @@ public:
         check("auto unpatched vertex offset", indirect_vs, false, records_per_kind + 4);
         check("indexed unpatched instance offset", indirect_vs, true, 6);
         check("auto unpatched instance offset", indirect_vs, false, records_per_kind + 6);
+        // Overlapping vertex buffers bind into one merged host range, sized by the buffer
+        // that ends last; an empty buffer binds the null buffer with no bytes.
+        {
+          static const auto merged_fetch = [] {
+            std::vector<u32> code{EncodeSMovB32(0, InlineU32(0)),
+                                  EncodeSmem0(0x02u, 20, 4), EncodeSmem1(0),
+                                  EncodeSmem0(0x02u, 24, 4), EncodeSmem1(16),
+                                  EncodeSmem0(0x02u, 28, 4), EncodeSmem1(32),
+                                  EncodeVop2(0x01u, 0, Vgpr(8), 5),
+                                  EncodeMubuf0(0x03u, 0, true), EncodeMubuf1(9, 5, 0),
+                                  EncodeMubuf0(0x03u, 0, true), EncodeMubuf1(13, 6, 0),
+                                  EncodeMubuf0(0x03u, 0, true), EncodeMubuf1(17, 7, 0),
+                                  EncodeExp0(0x0c, 0xf), EncodeExp1(9, 10, 11, 12)};
+            code.insert(code.end(), std::ranges::find(native_vertex, EncodeExp0(0x20, 0xf)),
+                        native_vertex.end());
+            return code;
+          }();
+          static ShaderSemantic semantics[]{
+              {.semantic = 0, .hardware_mapping = 9, .size_in_elements = 4},
+              {.semantic = 1, .hardware_mapping = 13, .size_in_elements = 4},
+              {.semantic = 2, .hardware_mapping = 17, .size_in_elements = 4}};
+          constexpr u32 format =
+              DstSel(4, 5, 6, 7) |
+              (static_cast<u32>(Prospero::BufferFormat::k32_32_32_32Float) << 12u);
+          constexpr uint64_t second_address = vertices_address + 16;
+          constexpr uint64_t empty_address = vertices_address + 0x1000;
+          // 160 bytes; 192 bytes from offset 16, past the first; no records.
+          static uint32_t buffers[]{
+              static_cast<u32>(vertices_address),
+              static_cast<u32>(vertices_address >> 32u) | (16u << 16u), 10, format,
+              static_cast<u32>(second_address),
+              static_cast<u32>(second_address >> 32u) | (32u << 16u), 6, format,
+              static_cast<u32>(empty_address),
+              static_cast<u32>(empty_address >> 32u) | (16u << 16u), 0, format};
+          constexpr u32 attribute_format =
+              static_cast<u32>(Prospero::VertexAttribFormat::k32_32_32_32Float) << 5u;
+          static const uint32_t attributes[]{attribute_format, attribute_format | 1u,
+                                             attribute_format | 2u};
+          const auto merged_vs = reinterpret_cast<uint64_t>(merged_fetch.data());
+          ShaderMapUserData(merged_vs,
+              {.type = Prospero::ShaderBinaryType::kGs, .user_data = &fetch_user_data,
+               .input_semantics = semantics, .num_input_semantics = 3,
+               .code_size_bytes = static_cast<uint32_t>(merged_fetch.size() * sizeof(u32))});
+          const uint64_t merged_tables[]{reinterpret_cast<uint64_t>(buffers),
+                                         reinterpret_cast<uint64_t>(attributes)};
+          for (u32 i = 0; i < 4; i++) {
+            shaders.SetGsUserSgpr(i, static_cast<u32>(merged_tables[i / 2] >> (i % 2 * 32)));
+          }
+          shaders.SetEsShaderBase(merged_vs);
+          // The draw before binds 64 bytes in the third slot, so a size left unwritten keeps them.
+          buffers[10] = 4;
+          const bool filled = RenderExecutorTestAccess::DrawAuto(
+              executor, scheduler.Current(), {.vertex_count = 3, .instance_count = 1});
+          buffers[10] = 0;
+          const RecordedCommandCounter counter;
+          const bool drawn = filled && RenderExecutorTestAccess::DrawAuto(
+              executor, scheduler.Current(), {.vertex_count = 3, .instance_count = 1});
+          const auto &bound = RecordedCommandCounter::vertex_buffers;
+          const auto null_buffer = static_cast<VkBuffer>(
+              context.GetBufferCache().GetBuffer(NULL_BUFFER_ID).Handle());
+          Require("VertexBufferMerge", "bindings",
+                  drawn && bound.sizes.size() == 3 && bound.buffers[0] == bound.buffers[1] &&
+                      bound.offsets[1] == bound.offsets[0] + 16 && bound.sizes[0] == 160 &&
+                      bound.sizes[1] == 192 && bound.buffers[2] == null_buffer &&
+                      bound.offsets[2] == 0 && bound.sizes[2] == 0,
+                  "overlapping vertex buffers did not share their merged range, or the "
+                  "empty one bound bytes");
+        }
       }
 
       // Mesh (NGG) indirect draws take their records from the GPU copy; the CPU backing holds
@@ -22335,6 +22449,40 @@ public:
             "scratch reuse overwrote an earlier result or its live conversion input");
     DestroyBuffer(&scratch_output);
     DestroyBuffer(&scratch_input);
+    // Detile leaves row, slice and level padding unwritten; uploads read only
+    // the copy regions, so padding compares as zero.
+    const auto keep_copied_bytes = [&](std::vector<uint8_t> *linear,
+                                       const ImageInfo &info) {
+      std::vector<uint8_t> copied(linear->size(), 0);
+      const auto &tiling = info.tiling;
+      const uint64_t bpe = tiling.block.bytes_per_element;
+      for (const auto &copy : info.BufferCopies()) {
+        const uint64_t row_bytes =
+            copy.bufferRowLength / tiling.texel_width * bpe;
+        const uint64_t slice_rows =
+            copy.bufferImageHeight / tiling.texel_height;
+        const uint64_t rows =
+            (copy.imageExtent.height + tiling.texel_height - 1u) /
+            tiling.texel_height;
+        const uint64_t bytes =
+            (copy.imageExtent.width + tiling.texel_width - 1u) /
+            tiling.texel_width * bpe;
+        const uint64_t slices =
+            std::max(copy.imageSubresource.layerCount, copy.imageExtent.depth);
+        for (uint64_t slice = 0; slice < slices; ++slice) {
+          for (uint64_t row = 0; row < rows; ++row) {
+            const uint64_t offset =
+                copy.bufferOffset + (slice * slice_rows + row) * row_bytes;
+            Require(name, "copied detile bytes",
+                    offset + bytes <= linear->size(),
+                    "an upload region lies outside the detiled output");
+            std::copy_n(linear->begin() + offset, bytes,
+                        copied.begin() + offset);
+          }
+        }
+      }
+      *linear = std::move(copied);
+    };
     const auto gpu_detile =
         [&](const std::vector<uint8_t> &tiled, std::vector<uint8_t> *linear,
             uint64_t tiled_capacity, uint64_t linear_capacity,
@@ -22350,8 +22498,16 @@ public:
               name, padded_linear, AllFlags,
               std::vector<u32>(static_cast<size_t>(padded_linear / sizeof(u32)),
                                0));
-          const auto result = (manager ? *manager : tile_manager)
-                                  .Detile(input.buffer, source_offset, info);
+          auto &tiler = manager ? *manager : tile_manager;
+          if (info.IsTiled()) {
+            // Poison the scratch Detile reuses, so an unwritten copied byte
+            // shows.
+            const auto scratch =
+                tiler.GetScratchBuffer(info.LinearSize(), input.buffer);
+            scheduler.Current().Handle().fillBuffer(
+                scratch.buffer, scratch.offset, scratch.size, 0xa5a5a5a5u);
+          }
+          const auto result = tiler.Detile(input.buffer, source_offset, info);
           Require(name, "detile capacity", result.size <= padded_linear,
                   "canonical transfer size exceeded the fixture output");
           const vk::BufferCopy copy{result.offset, 0, align_dword(result.size)};
@@ -22362,6 +22518,9 @@ public:
                        vk::AccessFlagBits::eTransferWrite);
           scheduler.Finish();
           *linear = read_bytes(output, linear_capacity);
+          if (info.IsTiled()) {
+            keep_copied_bytes(linear, info);
+          }
           DestroyBuffer(&output);
           DestroyBuffer(&input);
         };
@@ -23530,6 +23689,7 @@ public:
 
 #include "PssrGpuTests.inc"
 #include "BvhMirrorGpuTests.inc"
+#include "RayQueryTraversalGpuTests.inc"
 
 private:
   bool m_rasterization_supported = true;
@@ -29377,6 +29537,56 @@ TestCase VectorAlignByteUsesTwoBitByteOffset() {
       {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_ALIGNBYTE_B32,
        O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
   test.forbidden_spirv = {"OpTypeInt 64"};
+  return test;
+}
+
+TestCase VectorPermSelectsBytesSignsAndFills() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  // Bytes 7..0 = 7f 80 c0 11 88 33 7f 44: the top bits of bytes 1, 3, 5, 7 are 0, 1, 1, 0.
+  AppendVMovLiteral(&code, 0, 0x7f80c011u);
+  AppendVMovLiteral(&code, 1, 0x88337f44u);
+  const std::vector<u32> selectors = {0x03020100u, 0x07060504u, 0x0b0a0908u,
+                                      0xff0d0c05u, 0x00070104u, 0x80402010u};
+  for (u32 i = 0; i < static_cast<u32>(std::size(selectors)); i++) {
+    AppendVMovU32(&code, 2, i * sizeof(u32));
+    AppendBufferLoadDword(&code, 2, 2);
+    AppendVop3(&code, 0x344, 10u + i, Vgpr(0), Vgpr(1), Vgpr(2));
+    AppendStoreVgpr(&code, 10u + i, i);
+  }
+  AppendEnd(&code);
+
+  return {"VectorPermSelectsBytesSignsAndFills",
+          code,
+          selectors,
+          {0x88337f44u, 0x7f80c011u, 0x00ffff00u, 0xffff00c0u, 0x447f7f11u,
+           0xffffffffu},
+          {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_PERM_B32,
+           O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+}
+
+TestCase VectorPermLiteralSelectorFoldsSelection() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  for (u32 vgpr = 0; vgpr < 2; vgpr++) {
+    AppendVMovU32(&code, 30, vgpr * sizeof(u32));
+    AppendBufferLoadDword(&code, vgpr, 30);
+  }
+  AppendVop3(&code, 0x344, 10, Vgpr(0), Vgpr(1), 255);
+  code.push_back(0x0c0c0302u);
+  AppendStoreVgpr(&code, 10, 0);
+  AppendEnd(&code);
+
+  TestCase test{"VectorPermLiteralSelectorFoldsSelection",
+                code,
+                {0x7f80c011u, 0x88337f44u},
+                {0x00008833u},
+                {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_PERM_B32,
+                 O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+  test.forbidden_spirv = {"OpIEqual", "OpBitFieldSExtract",
+                          "OpBitFieldInsert %uint %uint_0"};
   return test;
 }
 
@@ -39160,11 +39370,13 @@ TestCase GlobalSignedImmediateRebasesBeforeSaddr() {
   return test;
 }
 
-// A load from a page without the accessed tag reads it and records a fault.
-TestCase GlobalLoadRecordsUnaccessedPage() {
+// A load from a page no buffer backs reads zero and records the page.
+TestCase GlobalLoadRecordsUnbackedPage() {
   auto test = GlobalSignedImmediateRebasesBeforeSaddr();
-  test.name = "GlobalLoadRecordsUnaccessedPage";
-  test.bda_mappings.front().accessed = false;
+  test.name = "GlobalLoadRecordsUnbackedPage";
+  test.expected = {0u};
+  test.fault_address = test.bda_mappings.front().guest_base + 4;
+  test.bda_mappings.front().guest_base += BufferCache::CACHING_PAGESIZE;
   return test;
 }
 
@@ -48843,6 +49055,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorBfeI32SignExtendsField);
   AddCase(VectorBfmDropsMaskBitsPastBit31);
   AddCase(VectorAlignByteUsesTwoBitByteOffset);
+  AddCase(VectorPermSelectsBytesSignsAndFills);
+  AddCase(VectorPermLiteralSelectorFoldsSelection);
   AddCase(VectorCarryAndBitCountOps);
   AddCase(ScalarVector64BitFloatInlineConstants);
   AddCase(VectorMbcntUsesThreadMask);
@@ -49162,7 +49376,7 @@ std::vector<TestCase> MakeCases() {
   cases.push_back(FlatLoadShortD16HiIntoAddressHighVgpr(64));
   AddCase(FlatVirtualAddressRebasesGuestAllocation);
   AddCase(GlobalSignedImmediateRebasesBeforeSaddr);
-  AddCase(GlobalLoadRecordsUnaccessedPage);
+  AddCase(GlobalLoadRecordsUnbackedPage);
   AddCase(FlatSegmentIgnoresSaddrAndMasksOffsetMsb);
   AddCase(ScratchIsPrivatePerInvocation);
   cases.push_back(FlatStackApertures(32));
@@ -51373,8 +51587,21 @@ void CheckImageTransitionState(RenderContext &renderer) {
   source_copies[1].imageSubresource = {vk::ImageAspectFlagBits::eStencil, 0, 0,
                                        1};
   source_copies[1].imageExtent = {2, 2, 1};
+  // Transfers end in the transfer-write state that readers transition from.
+  const auto RequireTransferWritten = [&](const Image &target,
+                                          const char *stage) {
+    Require(name, stage,
+            target.backing.state.layout ==
+                    vk::ImageLayout::eTransferDstOptimal &&
+                target.backing.state.access_mask ==
+                    vk::AccessFlagBits2::eTransferWrite &&
+                target.backing.subresource_states.empty(),
+            "a transfer ended with an extra layout transition");
+  };
   source.Upload(source_copies, upload.Handle(), upload_offset, 128);
+  RequireTransferWritten(source, "upload end state");
   destination.CopyMip(source, 1, 0);
+  RequireTransferWritten(destination, "mip copy end state");
 
   const auto [download_data, download_offset] = download.Map(128, 4);
   Require(name, "depth/stencil download map", download_data != nullptr,
@@ -51413,11 +51640,13 @@ void CheckImageTransitionState(RenderContext &renderer) {
   buffered_region.imageExtent = buffered_info.extent;
   buffered_source.Upload(std::span{&buffered_region, 1}, upload.Handle(),
                          buffered_upload_offset, buffered_expected.size());
+  RequireTransferWritten(buffered_source, "buffered upload end state");
   Buffer copy_scratch(context, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                       16);
   StreamBuffer copy_parameters(context, scheduler, MemoryUsage::Stream, 4096);
   TileManager copy_tiler(context, scheduler, copy_parameters);
   buffered_destination.CopyImageWithBuffer(buffered_source, copy_scratch, copy_tiler);
+  RequireTransferWritten(buffered_destination, "buffered copy end state");
   const auto [buffered_download_data, buffered_download_offset] =
       download.Map(buffered_expected.size(), 4);
   Require(name, "buffered-copy download map", buffered_download_data != nullptr,
@@ -54439,6 +54668,57 @@ void CheckPm4AcquireMemPackets(RenderContext &renderer) {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+void CheckPm4ResetQueue(RenderContext &renderer) {
+  constexpr const char *name = "Pm4ResetQueue";
+  namespace Op = Pm4::ResetQueueOp;
+  CommandProcessor processor(renderer, 0);
+  const auto reset = [&](uint32_t op) {
+    std::array<uint32_t, 29> packets{};
+    CommandBufferLayout dcb{packets.data(), packets.data() + packets.size(),
+                            packets.data(), packets.data() + packets.size(),
+                            nullptr, nullptr, 0};
+    Gen5::AgcDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer *>(&dcb), op,
+                           0);
+    Pm4Execution execution;
+    Require(name, "processed",
+            processor.Process(execution, {packets.data(), dcb.cursor_up}) ==
+                Pm4ProcessResult::Complete,
+            "the reset packets did not complete");
+    return packets;
+  };
+  // Drains, the occlusion-query stop and the mapping mask emit nothing.
+  const std::array<uint32_t, 29> expected{
+      0xc0017904u, 0x342u, 0xce000fffu, 0xc0002f00u, 1,           0xc0017a00u,
+      0x20000243u, 0x480u, 0xc0012600u, 0,           0,           0xc0001300u,
+      0xffffffffu, 0xc0021102u, 1,      0,           0,           0xc0021100u,
+      1,           0,      0,           0xc0065800u, 0x86007fc0u, 0xfffffffeu,
+      0xffu,       1,      0,           0x19u,       0xc3e1u};
+  Require(name, "native packets", reset(0xfffu) == expected,
+          "the reset packets are not the native ones");
+
+  // Stale state, with a context pushed over primitive reset index 5.
+  auto &ctx = processor.GetCtx();
+  ctx.SetPrimitiveResetIndex(5);
+  processor.ApplyContextStateOperation(ContextStateOperation::Push);
+  ctx.SetPrimitiveResetIndex(7);
+  processor.GetShCtx().SetCsUserSgpr(0, 7);
+  processor.GetUcfg().SetPrimitiveResetControl(7);
+  processor.SetDispatchIndirectArgsBaseAddress(0x1000);
+  reset(Op::ShState | Op::UcState | Op::PopContext);
+  Require(name, "Sh, Uc and pop",
+          ctx.GetPrimitiveResetIndex() == 5 &&
+              processor.GetShCtx().GetCs().cs_user_sgpr.value[0] == 0 &&
+              processor.GetUcfg().GetPrimitiveResetControl() == 0 &&
+              processor.GetDispatchIndirectArgsBaseAddress() == 0x1000,
+          "the reset did not pop the context and reset only Sh and Uc");
+  reset(Op::CxState | Op::BaseIndirectPointers);
+  Require(name, "Cx and indirect bases",
+          ctx.GetPrimitiveResetIndex() == 0xffffffffu &&
+              processor.GetDispatchIndirectArgsBaseAddress() == 0,
+          "the reset did not clear the context and the indirect bases");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPm4WaitPackets(RenderContext &renderer) {
   CommandProcessor processor(renderer, 0);
   constexpr auto packet_mismatch = static_cast<int>(0x8a6c000cu);
@@ -55327,7 +55607,10 @@ void CheckDeviceCreation() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
-// R_FLIP itself publishes the dumped occlusion counters, then flips.
+// A flip block copies GPU-written storage images back, publishes the dumped
+// occlusion counters, then flips; a wait for a shown buffer names it by its
+// label and returns once its flip is presented, and a blank one waits for
+// nothing.
 void CheckPm4Flip() {
   namespace EventQueue = LibKernel::EventQueue;
   constexpr const char *name = "Pm4Flip";
@@ -55358,9 +55641,24 @@ void CheckPm4Flip() {
               VideoOut::VideoOutAddFlipEvent(flips, handle, &udata) == 0,
           "video-out or flip event registration failed");
 
+  // A GPU-written storage image the flip's GL2 writeback copies back.
+  constexpr uint64_t image_size = 0x10000;
+  int64_t image_offset = -1;
+  void *image_memory = nullptr;
+  Require(name, "image memory",
+          LibKernel::Memory::KernelAllocateDirectMemory(
+              0, LibKernel::Memory::KernelGetDirectMemorySize(), image_size,
+              image_size, 0, &image_offset) == 0 &&
+              LibKernel::Memory::KernelMapDirectMemory(
+                  &image_memory, image_size, 0x3, 0, image_offset,
+                  image_size) == 0,
+          "the storage image mapping failed");
+  const auto image_base = reinterpret_cast<uint64_t>(image_memory);
+  renderer.MapMemory(image_base, image_size);
+
   alignas(16) std::array<uint64_t, OCCLUSION_QUERY_DBS * 2> results{};
-  constexpr int64_t flip_arg = 0x777;
-  std::array<uint32_t, 14> commands{};
+  constexpr int64_t flip_arg = 0x123456789ll;
+  std::array<uint32_t, 8 + 64 + 32 + 32> commands{};
   const auto dump = [&](size_t at, const uint64_t *counter) {
     const auto address = reinterpret_cast<uint64_t>(counter);
     commands[at] = KYTY_PM4(4, Pm4::IT_EVENT_WRITE, Pm4::R_ZERO);
@@ -55368,17 +55666,76 @@ void CheckPm4Flip() {
     commands[at + 2] = static_cast<uint32_t>(address);
     commands[at + 3] = static_cast<uint32_t>(address >> 32u);
   };
-  // Begin and end z-pass dumps, then a vsync flip of the blank buffer.
+  // Begin and end z-pass dumps, a vsync flip of the blank buffer, then waits
+  // for buffer 0 and for the blank buffer.
   dump(0, &results[0]);
   dump(4, &results[1]);
-  commands[8] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_FLIP);
-  commands[9] = static_cast<uint32_t>(handle);
-  commands[10] = static_cast<uint32_t>(-1);
-  commands[11] = 1;
-  commands[12] = flip_arg;
+  auto *begin = commands.data() + 8;
+  auto *end = commands.data() + commands.size();
+  CommandBufferLayout dcb{begin, end, begin, end, nullptr, nullptr, 0};
+  auto *buffer = reinterpret_cast<Gen5::CommandBuffer *>(&dcb);
+  int bus = -1;
+  const auto label = reinterpret_cast<uint64_t>(
+      VideoOut::VideoOutGetBufferLabels(handle, &bus));
+  const bool emitted =
+      Gen5::AgcDcbSetFlip(buffer, handle, 16, 1, 0) == nullptr &&
+      Gen5::AgcDcbWaitUntilSafeForRendering(buffer, handle, -3) == nullptr &&
+      Gen5::AgcDcbSetFlip(buffer, handle, -1, 1, flip_arg) == begin &&
+      Gen5::AgcDcbWaitUntilSafeForRendering(buffer, handle, 0) == begin + 64 &&
+      Gen5::AgcDcbWaitUntilSafeForRendering(buffer, handle, -1) ==
+          begin + 96 &&
+      dcb.cursor_up == end;
+  const std::array<uint32_t, 19> flip{
+      0xc0027904u, 0x342u,      0xc70101ffu, 0,           0xc0043704u,
+      0x06010000u, 0xc343u,     0,           0x23456789u, 0x1u,
+      0xc0064900u, 0x06200504u, 0x02010000u, 0,           0,
+      0,           0,           static_cast<uint32_t>(handle), 0xc02c1000u};
+  const std::array<uint32_t, 16> wait{0xc0017904u,
+                                      0x342u,
+                                      0xcb000000u,
+                                      0xc0079300u,
+                                      0x06000113u,
+                                      static_cast<uint32_t>(label),
+                                      static_cast<uint32_t>(label >> 32u),
+                                      0,
+                                      0,
+                                      0xffffffffu,
+                                      0xffffffffu,
+                                      0x40u,
+                                      0xc0017904u,
+                                      0x342u,
+                                      0xcb000020u,
+                                      0xc00f1000u};
+  const auto *blank = begin + 96;
+  Require(name, "native packets",
+          emitted && std::equal(flip.begin(), flip.end(), begin) &&
+              std::equal(wait.begin(), wait.end(), begin + 64) &&
+              blank[2] == 0xcb00001fu && blank[3] == 0xc0071000u &&
+              blank[14] == 0xcb00003fu,
+          "the flip or wait packets are not the native ones");
   bool complete = false;
   bool published = true;
+  bool queued = false;
+  bool copied = false;
   gpu.SendCommandSync([&] {
+    auto &texture_cache = renderer.GetTextureCache();
+    TextureCacheTestAccess::SetStorageReadback(texture_cache, true);
+    auto desc = VulkanHarness::MakeLinearDesc(
+        image_base, 0, vk::Format::eR32G32B32A32Sfloat,
+        Prospero::BufferFormat::k32_32_32_32Float,
+        Prospero::ImageType::kColor2D, {8, 8, 1}, 1, 16, 1);
+    desc.type = TextureCache::BindingType::Storage;
+    desc.info.tile_mode = Prospero::TileMode::kRenderTarget;
+    desc.info.pitch = 0;
+    desc.info.UpdateSize();
+    desc.view_info.usage = vk::ImageUsageFlagBits::eStorage;
+    const auto image = texture_cache.FindImage(desc);
+    (void)texture_cache.FindTexture(image, desc);
+    TextureCacheTestAccess::ClearImage(
+        texture_cache, renderer.GetCommandScheduler().Current(), image,
+        {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        vk::ClearValue{vk::ClearColorValue{std::array<float, 4>{1.0f}}});
+    queued = TextureCacheTestAccess::PendingDownload(texture_cache, image);
     CommandProcessor processor(renderer, 0);
     processor.BufferInit();
     Pm4Execution execution;
@@ -55387,8 +55744,11 @@ void CheckPm4Flip() {
     for (const auto counter : results) {
       published &= (counter & OCCLUSION_QUERY_READY) != 0;
     }
+    copied = !TextureCacheTestAccess::PendingDownload(texture_cache, image);
     processor.BufferFlush();
   });
+  Require(name, "GL2 writeback", queued && copied,
+          "the flip did not copy a GPU-written storage image back");
 
   // A present stalled on the graphics queue leaves the port readable.
   std::binary_semaphore queried{0};
@@ -55416,7 +55776,7 @@ void CheckPm4Flip() {
               count == 1 &&
               VideoOut::VideoOutGetEventData(&event, &flipped_arg) == 0 &&
               flipped_arg == flip_arg,
-          "R_FLIP did not publish the occlusion counters or flip");
+          "the flip block did not publish the occlusion counters or flip");
 
   // Vblanks while the event is undelivered count in that one event.
   Require(name, "vblank event",
@@ -55429,8 +55789,46 @@ void CheckPm4Flip() {
               VideoOut::VideoOutGetEventCount(&event) >= 2,
           "undelivered vblanks were queued as separate events");
 
+  // A shown buffer's flip and wait, on the headset port, which flips buffers
+  // that are not registered.
+  const int headset = VideoOut::VideoOutOpen(255, 32, 0, nullptr);
+  std::array<uint32_t, 64 + 32> shown{};
+  CommandBufferLayout shown_dcb{shown.data(), shown.data() + shown.size(),
+                                shown.data(), shown.data() + shown.size(),
+                                nullptr,      nullptr,
+                                0};
+  auto *shown_buffer = reinterpret_cast<Gen5::CommandBuffer *>(&shown_dcb);
+  const auto headset_label = reinterpret_cast<uint64_t>(
+      VideoOut::VideoOutGetBufferLabels(headset, &bus));
+  Require(name, "shown flip packet",
+          Gen5::AgcDcbSetFlip(shown_buffer, headset, 0, 1, 0) ==
+                  shown.data() &&
+              Gen5::AgcDcbWaitUntilSafeForRendering(shown_buffer, headset, 0) ==
+                  shown.data() + 64 &&
+              shown[2] == 0xc7010107u && shown[3] == 32u &&
+              shown[12] == 0x42010000u &&
+              shown[13] == static_cast<uint32_t>(headset_label) &&
+              shown[14] == static_cast<uint32_t>(headset_label >> 32u) &&
+              shown[15] == 1u,
+          "the flip packet of a shown buffer is not the native one");
+  bool shown_complete = false;
+  int shown_pending = -1;
+  gpu.SendCommandSync([&] {
+    CommandProcessor processor(renderer, 0);
+    processor.BufferInit();
+    Pm4Execution execution;
+    shown_complete =
+        processor.Process(execution, shown) == Pm4ProcessResult::Complete;
+    shown_pending = VideoOut::VideoOutIsFlipPending(headset);
+    processor.BufferFlush();
+  });
+  Require(name, "wait for a shown buffer", shown_complete && shown_pending == 0,
+          "the wait returned before its buffer's flip was presented");
+
   gpu.WaitForIdle();
-  Require(name, "close", VideoOut::VideoOutClose(handle) == 0,
+  Require(name, "close",
+          VideoOut::VideoOutClose(headset) == 0 &&
+              VideoOut::VideoOutClose(handle) == 0,
           "video-out close failed");
   EventQueue::KernelDeleteEqueue(flips);
   renderer.ShutdownGpu();
@@ -56391,7 +56789,7 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, FlatSubdwordLoadsApplyByteOffset());
     RunCase(&vulkan, FlatVirtualAddressRebasesGuestAllocation());
     RunCase(&vulkan, GlobalSignedImmediateRebasesBeforeSaddr());
-    RunCase(&vulkan, GlobalLoadRecordsUnaccessedPage());
+    RunCase(&vulkan, GlobalLoadRecordsUnbackedPage());
     RunCase(&vulkan, FlatSegmentIgnoresSaddrAndMasksOffsetMsb());
     RunCase(&vulkan, ScratchIsPrivatePerInvocation());
     return 0;
@@ -56569,6 +56967,11 @@ int main(int argc, char **argv) {
     vulkan.CheckHostImageAllocation();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--reset-queue-only") == 0) {
+    VulkanHarness vulkan;
+    CheckPm4ResetQueue(vulkan.RuntimeRenderer());
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--occlusion-dump-only") == 0) {
     VulkanHarness vulkan;
     CheckPm4SyntheticOcclusionCounterDump(vulkan.RuntimeRenderer());
@@ -56736,6 +57139,12 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, ScalarWqmB64PreservesPartialMasks());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--perm-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, VectorPermSelectsBytesSignsAndFills());
+    RunCase(&vulkan, VectorPermLiteralSelectorFoldsSelection());
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--alignbyte-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorAlignByteUsesTwoBitByteOffset());
@@ -56884,6 +57293,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--bvh-mirror-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBvhMirror();
+    vulkan.CheckRayQueryTraversal();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--pssr-only") == 0) {
@@ -57198,6 +57608,7 @@ int main(int argc, char **argv) {
   CheckSigninDialogLifecycle();
   CheckVulkan13FeatureRequirements();
   CheckPm4AcquireMemPackets(vulkan.RuntimeRenderer());
+  CheckPm4ResetQueue(vulkan.RuntimeRenderer());
   CheckPm4SyntheticOcclusionCounterDump(vulkan.RuntimeRenderer());
   CheckPm4Predication(vulkan.RuntimeRenderer());
   CheckPm4StencilInfoValueLane(vulkan.RuntimeRenderer());
@@ -57279,6 +57690,7 @@ int main(int argc, char **argv) {
   vulkan.CheckBdaPageTableUploads();
   vulkan.CheckBdaSyncUploads();
   vulkan.CheckBvhMirror();
+  vulkan.CheckRayQueryTraversal();
   vulkan.CheckFaultBufferScan();
   vulkan.CheckFaultRecordsOverflow();
   vulkan.CheckLargeSparseImageUpload();

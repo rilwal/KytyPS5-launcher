@@ -24,7 +24,7 @@ enum Mode : uint32_t { Walk, Triangles, Boxes, Instances };
 
 constexpr uint32_t PairGeometry = 1; // The geometry hash of its last build or update is known.
 constexpr uint32_t PairUpdated  = 2;
-constexpr uint32_t StateAbsent  = 1; // The job met an unsynchronized page.
+constexpr uint32_t StateAbsent  = 1; // The job met a page no buffer backs.
 constexpr uint32_t GroupSize    = 64;
 constexpr uint64_t TriangleSize = 36;
 
@@ -93,6 +93,7 @@ struct BlasState {
 struct PairState {
 	uint32_t links;
 	uint32_t fail;
+	uint32_t used; // A visible instance named the pair.
 };
 
 // The BLAS states follow it, at the 16-byte alignment of a buffer reference.
@@ -101,6 +102,7 @@ struct alignas(16) Context {
 	uint32_t instances;
 	uint32_t missing_count;
 	uint64_t structure;
+	uint64_t records;
 };
 static_assert(sizeof(Context) == 32);
 
@@ -213,9 +215,7 @@ void RayTracing::Reserve(std::unique_ptr<Buffer>& buffer, vk::BufferUsageFlags u
 	if (buffer && buffer->Size() >= size) {
 		return;
 	}
-	if (buffer) {
-		m_scheduler.DeferOperation([retired = std::move(buffer)] {});
-	}
+	Retire(buffer);
 	buffer = std::make_unique<Buffer>(m_graphics, m_scheduler, memory, 0,
 	                                  usage | vk::BufferUsageFlagBits::eShaderDeviceAddress,
 	                                  std::bit_ceil(size));
@@ -224,13 +224,7 @@ void RayTracing::Reserve(std::unique_ptr<Buffer>& buffer, vk::BufferUsageFlags u
 void RayTracing::Create(Structure& structure, const vk::AccelerationStructureGeometryKHR& geometry,
                         vk::AccelerationStructureTypeKHR       type,
                         vk::BuildAccelerationStructureFlagsKHR flags, uint32_t capacity) {
-	// The structure it replaces retires with its buffer.
-	if (structure.handle) {
-		m_scheduler.DeferOperation([device = m_graphics.device, handle = structure.handle,
-		                            retired = std::move(structure.buffer)] {
-			device.destroyAccelerationStructureKHR(handle, nullptr);
-		});
-	}
+	Retire(structure);
 	vk::AccelerationStructureBuildGeometryInfoKHR info {};
 	info.type          = type;
 	info.flags         = flags;
@@ -254,6 +248,22 @@ void RayTracing::Create(Structure& structure, const vk::AccelerationStructureGeo
 	structure.build_scratch  = sizes.buildScratchSize;
 	structure.update_scratch = sizes.updateScratchSize;
 	structure.capacity       = capacity;
+}
+
+// Retired buffers and structures outlive the commands recorded so far.
+void RayTracing::Retire(std::unique_ptr<Buffer>& buffer) {
+	if (buffer) {
+		m_scheduler.DeferOperation([retired = std::move(buffer)] {});
+	}
+}
+
+void RayTracing::Retire(Structure& structure) {
+	if (structure.handle) {
+		m_scheduler.DeferOperation([device = m_graphics.device, handle = structure.handle,
+		                            retired = std::move(structure.buffer)] {
+			device.destroyAccelerationStructureKHR(handle, nullptr);
+		});
+	}
 }
 
 void RayTracing::AddPair(uint64_t blas, uint32_t root) {
@@ -335,6 +345,13 @@ void RayTracing::Apply(Area& area) {
 			m_pairs[index].walked = false;
 		}
 	}
+	for (size_t index = 0; index < area.pairs; ++index) {
+		PairState state {};
+		std::memcpy(&state, data + layout.pair_states + sizeof(state) * index, sizeof(state));
+		if (state.used != 0) {
+			m_pairs[index].used = true;
+		}
+	}
 	for (auto& pair: m_pairs) {
 		if (pair.update_serial == area.serial) {
 			pair.geometry       = states[pair.blas].geometry;
@@ -370,17 +387,24 @@ void RayTracing::Apply(Area& area) {
 }
 
 vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
-	m_context.PrepareBda();
 	Collect();
-	auto& area = m_areas[m_next_area];
-	if (area.tick != 0) {
-		m_scheduler.Wait(area.tick);
+	// A TLAS with no readback in flight waits for an area, so calls over other TLASes cannot take
+	// every area from it.
+	const auto busy = [&](const Area& area) { return area.tick != 0 && area.tlas == tlas; };
+	if (m_areas[m_next_area].tick != 0 && std::ranges::none_of(m_areas, busy)) {
+		m_scheduler.Wait(m_areas[m_next_area].tick);
 		Collect();
 	}
-	m_next_area       = (m_next_area + 1) % Areas;
+	Area       unread;
+	const bool readback = m_areas[m_next_area].tick == 0;
+	auto&      area     = readback ? m_areas[m_next_area] : unread;
+	if (readback) {
+		m_next_area = (m_next_area + 1) % Areas;
+	}
 	const auto serial = ++m_serial;
 
 	auto& top = m_tlases[tlas];
+	top.used  = true;
 	if (top.structure.capacity != top.instance_slots) {
 		Reserve(top.instances, BuildInput, 64ull * top.instance_slots);
 		Create(top.structure, InstanceGeometry(top.instances->BufferDeviceAddress()),
@@ -389,7 +413,7 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 	}
 
 	// Triangle buffers for records [begin, end), which the header bound keeps within the minimum
-	// primitive limit of a device.
+	// primitive limit of a device. Only BLASes the call builds from get theirs written.
 	std::vector<GpuBlas>                 blases(m_blases.size());
 	std::vector<std::array<uint32_t, 2>> triangle_chunks;
 	area.covered.assign(m_blases.size(), 0);
@@ -400,8 +424,7 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 			Reserve(blas.triangles, BuildInput, TriangleSize * records);
 			blas.capacity = static_cast<uint32_t>(blas.triangles->Size() / TriangleSize);
 		}
-		blases[index] = {blas.address, blas.triangles ? blas.triangles->BufferDeviceAddress() : 0,
-		                 blas.capacity};
+		blases[index] = {blas.address, 0, blas.capacity};
 		// A BLAS of unknown size gets one chunk, which reads its header.
 		do {
 			triangle_chunks.push_back({index, area.covered[index]});
@@ -445,10 +468,11 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 			       vk::AccelerationStructureTypeKHR::eBottomLevel, BlasFlags, pair.count);
 		}
 		if (rebuild || update) {
-			pair.built          = true;
-			pair.update_serial  = serial;
-			pair.geometry_known = false;
-			geometries.push_back(TriangleGeometry(blas.triangles->BufferDeviceAddress() +
+			pair.built                  = true;
+			pair.update_serial          = serial;
+			pair.geometry_known         = false;
+			blases[pair.blas].triangles = blas.triangles->BufferDeviceAddress();
+			geometries.push_back(TriangleGeometry(blases[pair.blas].triangles +
 			                                          TriangleSize * (pair.first - blas.begin),
 			                                      pair.count));
 			vk::AccelerationStructureBuildGeometryInfoKHR info {};
@@ -503,7 +527,6 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 	    Layout(m_blases.size(), m_pairs.size(), area.walks.size(), top.instance_slots);
 	Reserve(m_state, vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst,
 	        layout.size);
-	Reserve(area.buffer, vk::BufferUsageFlagBits::eTransferDst, layout.size, MemoryUsage::Download);
 	const auto state = m_state->BufferDeviceAddress();
 
 	// One upload: the parameters, then the tables they point to.
@@ -614,15 +637,81 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 	command.buildAccelerationStructuresKHR(1, &info, &range_pointer);
 	Barrier(command);
 
-	const vk::BufferCopy copy {0, 0, layout.size};
-	command.copyBuffer(m_state->Handle(), area.buffer->Handle(), 1, &copy);
-	Barrier(command);
+	if (readback) {
+		Reserve(area.buffer, vk::BufferUsageFlagBits::eTransferDst, layout.size,
+		        MemoryUsage::Download);
+		const vk::BufferCopy copy {0, 0, layout.size};
+		command.copyBuffer(m_state->Handle(), area.buffer->Handle(), 1, &copy);
+		Barrier(command);
+	}
 	area.tick           = m_scheduler.CurrentTick();
 	area.serial         = serial;
 	area.tlas           = tlas;
 	area.instance_slots = top.instance_slots;
 	area.pairs          = m_pairs.size();
 	return state;
+}
+
+void RayTracing::RunGarbageCollector() {
+	if (++m_frame % EvictFrames != 0) {
+		return;
+	}
+	Collect();
+	std::erase_if(m_tlases, [&](auto& entry) {
+		auto& top = entry.second;
+		if (top.used) {
+			top.used = false;
+			return false;
+		}
+		Retire(top.structure);
+		Retire(top.instances);
+		return true;
+	});
+	size_t live = 0;
+	for (auto& pair: m_pairs) {
+		if (!pair.used) {
+			Retire(pair.structure);
+			Retire(pair.boxes);
+			continue;
+		}
+		pair.used       = false;
+		m_pairs[live++] = std::move(pair);
+	}
+	if (live == m_pairs.size()) {
+		return;
+	}
+	m_pairs.resize(live);
+
+	// BLASes left without pairs go too. The readbacks in flight, with the walks they carry, hold
+	// the old indices and go as well.
+	std::vector<bool> named(m_blases.size());
+	for (const auto& pair: m_pairs) {
+		named[pair.blas] = true;
+	}
+	std::vector<uint32_t> remap(m_blases.size());
+	uint32_t              kept = 0;
+	m_blas_index.clear();
+	for (uint32_t index = 0; index < m_blases.size(); ++index) {
+		if (!named[index]) {
+			Retire(m_blases[index].triangles);
+			continue;
+		}
+		remap[index] = kept;
+		m_blas_index.emplace(m_blases[index].address, kept);
+		m_blases[kept++] = std::move(m_blases[index]);
+	}
+	m_blases.resize(kept);
+	m_pair_index.clear();
+	for (uint32_t index = 0; index < m_pairs.size(); ++index) {
+		auto& pair   = m_pairs[index];
+		pair.blas    = remap[pair.blas];
+		pair.walking = false;
+		m_pair_index.emplace(std::pair {m_blases[pair.blas].address, pair.root}, index);
+	}
+	m_keys.clear();
+	for (auto& area: m_areas) {
+		area.tick = 0;
+	}
 }
 
 } // namespace Libs::Graphics
