@@ -5,6 +5,7 @@
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
@@ -10511,9 +10512,11 @@ void TestAutomaticObjectPrimitiveId() {
 }
 
 void TestRenderTargetReverseExportMapping() {
+  GraphicContext graphics;
+  graphics.r4g4b4a4_render_targets = true;
   const auto format = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k16_16_16_16, Prospero::ChannelType::kFloat,
-      Prospero::ChannelOrder::kReversed);
+      graphics, Prospero::ChannelLayout::k16_16_16_16,
+      Prospero::ChannelType::kFloat, Prospero::ChannelOrder::kReversed);
   Check(format.format == vk::Format::eR16G16B16A16Sfloat &&
             format.bytes_per_element == 8u,
         "reverse RGBA16F render target did not retain its native host format "
@@ -10527,13 +10530,13 @@ void TestRenderTargetReverseExportMapping() {
         "reverse RGBA16F render-target export or write-mask mapping is "
         "incorrect");
   const auto legacy_alt = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k8_8_8_8, Prospero::ChannelType::kUNorm,
-      Prospero::ChannelOrder::kAlt);
+      graphics, Prospero::ChannelLayout::k8_8_8_8,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kAlt);
   Check(legacy_alt.format == vk::Format::eB8G8R8A8Unorm &&
             legacy_alt.export_mapping.IsIdentity(),
         "legacy BGRA render target acquired a duplicate shader export mapping");
   const auto gr32 = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k32_32, Prospero::ChannelType::kFloat,
+      graphics, Prospero::ChannelLayout::k32_32, Prospero::ChannelType::kFloat,
       Prospero::ChannelOrder::kReversed);
   Check(gr32.format == vk::Format::eR32G32Sfloat &&
             gr32.bytes_per_element == 8u &&
@@ -10583,7 +10586,7 @@ void TestRenderTargetReverseExportMapping() {
   for (const auto &mapping_case : mapping_cases) {
     for (uint32_t order = 0; order < 4u; order++) {
       const auto info = TextureGetRenderTargetFormat(
-          mapping_case.layout, mapping_case.type,
+          graphics, mapping_case.layout, mapping_case.type,
           static_cast<Prospero::ChannelOrder>(order));
       Check(info.format == mapping_case.format &&
                 info.bytes_per_element == mapping_case.bytes &&
@@ -10600,41 +10603,49 @@ void TestRenderTargetReverseExportMapping() {
   }
 
   const auto alt_1010102 = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k10_10_10_2, Prospero::ChannelType::kUNorm,
-      Prospero::ChannelOrder::kAlt);
+      graphics, Prospero::ChannelLayout::k10_10_10_2,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kAlt);
   Check(alt_1010102.format == vk::Format::eA2R10G10B10UnormPack32 &&
             alt_1010102.export_mapping.IsIdentity(),
         "native alternate 10:10:10:2 render target acquired a shader mapping");
   const auto reversed_4444 = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k4_4_4_4, Prospero::ChannelType::kUNorm,
-      Prospero::ChannelOrder::kReversed);
+      graphics, Prospero::ChannelLayout::k4_4_4_4,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kReversed);
   Check(reversed_4444.format == vk::Format::eR4G4B4A4UnormPack16 &&
             reversed_4444.export_mapping.IsIdentity(),
         "reversed 4:4:4:4 render target did not compose storage and channel "
         "order");
   const auto standard_4444 = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k4_4_4_4, Prospero::ChannelType::kUNorm,
-      Prospero::ChannelOrder::kStandard);
+      graphics, Prospero::ChannelLayout::k4_4_4_4,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kStandard);
   Check(standard_4444.format == vk::Format::eR4G4B4A4UnormPack16 &&
             standard_4444.export_mapping == Prospero::ColorMappingAbgr,
         "standard 4:4:4:4 render target did not compensate host packed-bit "
         "order");
   const auto standard_5551 = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k5_5_5_1, Prospero::ChannelType::kUNorm,
-      Prospero::ChannelOrder::kStandard);
+      graphics, Prospero::ChannelLayout::k5_5_5_1,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kStandard);
   Check(standard_5551.format == vk::Format::eA1R5G5B5UnormPack16 &&
             standard_5551.export_mapping == Prospero::ColorMappingBgra,
         "5:5:5:1 render target did not preserve its high one-bit component");
+  GraphicContext no_4444_targets;
+  const auto fallback_4444 = TextureGetRenderTargetFormat(
+      no_4444_targets, Prospero::ChannelLayout::k4_4_4_4,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kStandard);
+  Check(fallback_4444.format == standard_5551.format &&
+            fallback_4444.export_mapping == standard_5551.export_mapping,
+        "4:4:4:4 render target without host support did not fall back to "
+        "5:5:5:1");
   const auto standard_1555 = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k1_5_5_5, Prospero::ChannelType::kUNorm,
-      Prospero::ChannelOrder::kStandard);
+      graphics, Prospero::ChannelLayout::k1_5_5_5,
+      Prospero::ChannelType::kUNorm, Prospero::ChannelOrder::kStandard);
   Check(standard_1555.format == vk::Format::eR5G5B5A1UnormPack16 &&
             standard_1555.export_mapping == Prospero::ColorMappingAbgr,
         "1:5:5:5 render target did not preserve its low one-bit component");
 
   const auto argb = TextureGetRenderTargetFormat(
-      Prospero::ChannelLayout::k16_16_16_16, Prospero::ChannelType::kFloat,
-      Prospero::ChannelOrder::kAltReversed);
+      graphics, Prospero::ChannelLayout::k16_16_16_16,
+      Prospero::ChannelType::kFloat, Prospero::ChannelOrder::kAltReversed);
   Check(argb.export_mapping == Prospero::ColorMappingArgb &&
             argb.export_mapping.ApplyMask(0x1u) == 0x2u &&
             argb.export_mapping.ApplyMask(0x2u) == 0x4u &&
