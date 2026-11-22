@@ -31,14 +31,7 @@ struct Number {
 
 struct Text {
 	std::string ConfigOptions::* field;
-	// Refuses values the emulator can't take; without it, any text applies.
-	bool (*valid)(std::string_view) = nullptr;
 };
-
-// An activity ID as --launch-activity takes it, or empty for none.
-bool ValidActivityId(std::string_view id) {
-	return id.size() <= 32 && std::ranges::all_of(id, [](char c) { return c >= ' ' && c <= '~'; });
-}
 
 struct Folder {
 	std::filesystem::path ConfigOptions::* field;
@@ -191,10 +184,6 @@ const std::array ENTRIES = {
            "The console's language, which games and trophy lists use."},
     Entry {"user-name", "User name", "System", Text {&ConfigOptions::user_name},
            "The player's name on the emulated console."},
-    Entry {"launch-activity", "Launch activity", "System",
-           Text {&ConfigOptions::launch_activity, ValidActivityId},
-           "Start the game in this activity, by its activity ID (up to 32 printable ASCII "
-           "characters). Empty starts it normally."},
     Entry {"network-connected", "Network", "System", Toggle {&ConfigOptions::network_connected},
            "Use the host's local network.", true},
     Entry {"emulate-psn", "Simulate PSN sign-in", "System",
@@ -367,9 +356,6 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 			    }
 			    cfg.*kind.field = (value == "true") != kind.inverted;
 		    } else if constexpr (std::is_same_v<K, Text>) {
-			    if (kind.valid != nullptr && !kind.valid(value)) {
-				    return invalid();
-			    }
 			    cfg.*kind.field = value;
 		    } else if constexpr (std::is_same_v<K, Folder>) {
 			    cfg.*kind.field = Common::PathFromUtf8(value);
