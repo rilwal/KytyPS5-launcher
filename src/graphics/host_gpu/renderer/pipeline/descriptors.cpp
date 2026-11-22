@@ -423,14 +423,9 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	if (!info.IsTiled()) {
 		return false;
 	}
-	ImageInfo physical = info;
-	// A view entirely past MAX_MIP addresses its own chain starting at its base mip (PPSA02110
-	// compresses mip 1 through a T# that declares one level).
-	if (base_level >= physical_levels) {
-		const auto mip  = info.MipExtent(base_level);
-		physical.extent = {mip.width, mip.height, info.IsVolume() ? mip.depth : 1u};
-		physical_levels = view_levels;
-	}
+	// UpdateSize keeps a nonzero data size, so each candidate layout starts from the request.
+	const ImageInfo requested = info;
+	ImageInfo       physical  = requested;
 	physical.resources.levels = physical_levels;
 	physical.UpdateSize();
 	info.UpdateSize();
@@ -438,14 +433,35 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 		return physical.mip_layout[target] == info.mip_layout[source] &&
 		       physical.MipExtent(target) == info.MipExtent(source);
 	};
-	if (physical.first_tail_level == info.first_tail_level &&
-	    physical.tiled_slice_stride == info.tiled_slice_stride &&
-	    physical.data.size == info.data.size) {
-		bool matches = true;
-		for (uint32_t level = 0; level < physical_levels; ++level) {
-			matches &= same_mip(level, level);
+	// The chain through the view's last level stores every MAX_MIP level where the T# does.
+	const auto same_chain = [&] {
+		if (physical.first_tail_level != info.first_tail_level ||
+		    physical.tiled_slice_stride != info.tiled_slice_stride ||
+		    physical.data.size != info.data.size) {
+			return false;
 		}
-		if (matches) {
+		for (uint32_t level = 0; level < physical_levels; ++level) {
+			if (!same_mip(level, level)) {
+				return false;
+			}
+		}
+		return true;
+	};
+	// Levels past MAX_MIP that land in the stored chain's mip tail keep their tail slots
+	// (PPSA21564 writes mip 6 of a 1920x1080 chain whose T# declares six levels into its tail).
+	if (same_chain()) {
+		return true;
+	}
+	// Any other view entirely past MAX_MIP addresses its own chain starting at its base mip
+	// (PPSA02110 compresses mip 1 through a T# that declares one level).
+	if (base_level >= physical_levels) {
+		const auto mip            = info.MipExtent(base_level);
+		physical                  = requested;
+		physical.extent           = {mip.width, mip.height, info.IsVolume() ? mip.depth : 1u};
+		physical_levels           = view_levels;
+		physical.resources.levels = physical_levels;
+		physical.UpdateSize();
+		if (same_chain()) {
 			return true;
 		}
 	}

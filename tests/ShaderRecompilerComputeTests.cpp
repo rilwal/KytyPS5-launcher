@@ -17149,6 +17149,32 @@ public:
 #endif
       }
       {
+        // PPSA21564 builds a downsample chain by writing the mip after MAX_MIP of a
+        // RenderTarget-tiled color whose last declared mip already starts the mip tail;
+        // here a 128x128 R32G32 chain declares two levels (mip 1 starts the tail) and
+        // stores mip 2, which keeps its slot in the stored tail block.
+        constexpr uint64_t address = base + 0x500000;
+        ShaderRecompiler::IR::DescriptorValue descriptor{};
+        descriptor.dwords = {static_cast<uint32_t>(address >> 8u),
+                             0xc3e00000u, 0x001fc01fu, 0x91b22facu, 0, 0x00700010u, 0, 0};
+        descriptor.dword_count = 8;
+        const auto store =
+            RenderExecutorTestAccess::ResolveTexture(executor, storage_resource, descriptor);
+        auto declared = descriptor;
+        declared.dwords[3] = 0x91b10facu;
+        const auto chain =
+            RenderExecutorTestAccess::ResolveTexture(executor, storage_resource, declared);
+        Require(name, "tail mip view past MAX_MIP",
+                store.desc.info.extent.width == 128 &&
+                    store.desc.info.extent.height == 128 &&
+                    store.desc.info.resources.levels == 3 &&
+                    store.desc.info.first_tail_level == 1 &&
+                    store.desc.info.data.size == chain.desc.info.data.size &&
+                    store.desc.view_info.base_level == 2 &&
+                    store.desc.view_info.level_count == 1,
+                "a view past MAX_MIP into the stored mip tail left the tail");
+      }
+      {
         // PPSA28180 samples a 512x32 R32 Standard256B chain, which ends at 1x1
         // in mip 9, with LAST_LEVEL 10; the extra level has no storage.
         constexpr uint64_t address = base + 0x200000;
