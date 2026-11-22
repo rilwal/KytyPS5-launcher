@@ -170,6 +170,15 @@ void TestSettings() {
 	Check(Launcher::Settings::Apply(cfg, "readback-storage-images", "true").empty() &&
 	          cfg.readback_storage_images,
 	      "storage image readback applies");
+	Check(Launcher::Settings::Apply(cfg, "launch-activity", "act_main-1").empty() &&
+	          cfg.launch_activity == "act_main-1",
+	      "a launch activity applies");
+	Check(!Launcher::Settings::Apply(cfg, "launch-activity", std::string(33, 'a')).empty() &&
+	          !Launcher::Settings::Apply(cfg, "launch-activity", "act\n1").empty() &&
+	          cfg.launch_activity == "act_main-1",
+	      "an activity ID --launch-activity would refuse is refused");
+	Check(Launcher::Settings::Apply(cfg, "launch-activity", "").empty() && cfg.launch_activity.empty(),
+	      "an empty launch activity starts the game normally");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
 	for (const char* key: {"perf-overlay", "resolution", "fullscreen", "stretch", "present-mode",
 	                       "vblank-frequency", "hide-cursor", "tessellation", "sync-raw-image-buffers",
@@ -180,7 +189,7 @@ void TestSettings() {
 	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
 	                       "emulate-psn", "console-language", "user-name", "flush-draws",
 	                       "pssr-upscaler", "native-rt", "dlss-folder", "dlss-preset",
-	                       "fsr-folder"}) {
+	                       "fsr-folder", "launch-activity"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
@@ -216,8 +225,9 @@ void TestPluginRows() {
 	const auto rows = Launcher::Settings::PluginRows();
 	Check(rows.front().key == "resolution", "every setting, in order");
 	for (const auto& row: rows) {
-		const bool own = row.key == "user-name" || row.key == "console-language" ||
-		                 row.key == "dlss-folder" || row.key == "fsr-folder";
+		const bool own = row.key == "user-name" || row.key == "launch-activity" ||
+		                 row.key == "console-language" || row.key == "dlss-folder" ||
+		                 row.key == "fsr-folder";
 		Check(row.runner == own,
 		      "only text, folders and the trophy language are the plugin's own settings");
 		Check(row.runner || (row.kind != Launcher::Settings::Row::Kind::Text &&
