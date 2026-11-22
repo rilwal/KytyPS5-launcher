@@ -129,7 +129,8 @@ const std::array ENTRIES = {
     Entry {"relaxed-shader-float", "Relaxed shader float math", "Graphics",
            Toggle {&ConfigOptions::relaxed_shader_float},
            "Use the host GPU's native float operations in shaders. Faster, but can be inaccurate."},
-    Entry {"native-rt", "Native ray tracing", "Graphics", Toggle {&ConfigOptions::native_rt},
+    Entry {"native-rt", "Native ray tracing (experimental)", "Graphics",
+           Toggle {&ConfigOptions::native_rt},
            "Mirror the game's ray tracing structures into the host GPU's own and trace rays with "
            "its ray queries, when it has them."},
     Entry {"tessellation", "Tessellation", "Graphics",
@@ -191,8 +192,9 @@ const std::array ENTRIES = {
     Entry {"skip-notice-screen", "Skip notice screens", "System",
            Toggle {&ConfigOptions::skip_notice_screen},
            "Skip startup logos and notices in games that support it."},
-    Entry {"playgo-hack", "PlayGo fallback", "System", Toggle {&ConfigOptions::playgo_hack_enabled},
-           "Use the supplied PlayGo stub as a fallback."},
+    Entry {"playgo-hack", "PlayGo chunk fallback", "System",
+           Toggle {&ConfigOptions::playgo_hack_enabled},
+           "Report 1000 PlayGo chunks, not 1, for a game without chunk metadata."},
     Entry {"amd-cpu", "AMD CPU patches", "System", Toggle {&ConfigOptions::amd_cpu_enabled},
            "Apply AMD CPU instruction patches."},
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
