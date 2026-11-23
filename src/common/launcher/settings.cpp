@@ -42,10 +42,11 @@ struct Resolution {};
 struct LanguageChoice {};
 struct DlssPresetChoice {};
 struct PssrUpscalerChoice {};
+struct AudioOutputChoice {};
 
-using Kind =
-    std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, Folder, PresentModeChoice,
-                 Resolution, LanguageChoice, DlssPresetChoice, PssrUpscalerChoice>;
+using Kind = std::variant<Toggle, Number<uint32_t>, Number<int32_t>, Text, Folder,
+                          PresentModeChoice, Resolution, LanguageChoice, DlssPresetChoice,
+                          PssrUpscalerChoice, AudioOutputChoice>;
 
 struct Entry {
 	std::string_view key;
@@ -77,6 +78,10 @@ constexpr std::array<std::string_view, 3> OFFERED_PSSR_UPSCALERS = {"Linear", "D
 #else
 constexpr std::array<std::string_view, 2> OFFERED_PSSR_UPSCALERS = {"Linear", "DLSS"};
 #endif
+
+// By Config::AudioOutput, as on the command line
+constexpr std::array<std::string_view, 4> AUDIO_OUTPUTS = {"TV", "AVReceiver", "SoundBar",
+                                                           "Headphones"};
 
 // By the preset number: 0 is the model's own, then A to O as on the command line
 constexpr std::array<std::string_view, 16> DLSS_PRESETS = {
@@ -184,6 +189,9 @@ const std::array ENTRIES = {
            "The console's language, which games and trophy lists use."},
     Entry {"user-name", "User name", "System", Text {&ConfigOptions::user_name},
            "The player's name on the emulated console."},
+    Entry {"audio-output", "Audio output", "System", AudioOutputChoice {},
+           "The audio device games are told they play through: TV, AVReceiver (7.1), SoundBar "
+           "(5.1) or Headphones."},
     Entry {"network-connected", "Network", "System", Toggle {&ConfigOptions::network_connected},
            "Use the host's local network.", true},
     Entry {"emulate-psn", "Simulate PSN sign-in", "System",
@@ -220,6 +228,17 @@ std::string_view PresentModeName(Config::PresentMode mode) {
 	return PRESENT_MODES.at(static_cast<size_t>(mode));
 }
 
+// The name in `names` that is `value` in any case
+template <size_t N>
+auto FindIgnoringCase(const std::array<std::string_view, N>& names, std::string_view value) {
+	return std::ranges::find_if(names, [&](std::string_view name) {
+		return std::ranges::equal(name, value, [](char a, char b) {
+			return std::tolower(static_cast<unsigned char>(a)) ==
+			       std::tolower(static_cast<unsigned char>(b));
+		});
+	});
+}
+
 template <typename T>
 bool ParseNumber(std::string_view text, T& out) {
 	auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), out);
@@ -247,6 +266,8 @@ std::string ValueOf(const Entry& e, const ConfigOptions& cfg) {
 			    return std::string(DLSS_PRESETS.at(cfg.dlss_preset));
 		    } else if constexpr (std::is_same_v<K, PssrUpscalerChoice>) {
 			    return std::string(PSSR_UPSCALERS.at(static_cast<size_t>(cfg.pssr_upscaler)));
+		    } else if constexpr (std::is_same_v<K, AudioOutputChoice>) {
+			    return std::string(AUDIO_OUTPUTS.at(static_cast<size_t>(cfg.audio_output)));
 		    } else {
 			    return std::to_string(cfg.*kind.field);
 		    }
@@ -300,6 +321,9 @@ std::vector<Row> PluginRows() {
 				    row.kind = Row::Kind::Choice;
 				    row.choices.assign(OFFERED_PSSR_UPSCALERS.begin(),
 				                       OFFERED_PSSR_UPSCALERS.end());
+			    } else if constexpr (std::is_same_v<K, AudioOutputChoice>) {
+				    row.kind = Row::Kind::Choice;
+				    row.choices.assign(AUDIO_OUTPUTS.begin(), AUDIO_OUTPUTS.end());
 			    } else {
 				    // The entry's own steps, else at most 25 even ones; always with the default
 				    row.kind = Row::Kind::Choice;
@@ -397,17 +421,20 @@ std::string Apply(ConfigOptions& cfg, std::string_view key,
 		    } else if constexpr (std::is_same_v<K, PssrUpscalerChoice>) {
 			    // Any of them, in any case, as on the command line; an upscaler this build can't
 			    // load falls back to Linear when the game starts
-			    const auto it = std::ranges::find_if(PSSR_UPSCALERS, [&](std::string_view name) {
-				    return std::ranges::equal(name, value, [](char a, char b) {
-					    return std::tolower(static_cast<unsigned char>(a)) ==
-					           std::tolower(static_cast<unsigned char>(b));
-				    });
-			    });
+			    const auto it = FindIgnoringCase(PSSR_UPSCALERS, value);
 			    if (it == PSSR_UPSCALERS.end()) {
 				    return invalid();
 			    }
 			    cfg.pssr_upscaler =
 			        static_cast<Config::PssrUpscaler>(std::distance(PSSR_UPSCALERS.begin(), it));
+		    } else if constexpr (std::is_same_v<K, AudioOutputChoice>) {
+			    // Any of them, in any case, as on the command line
+			    const auto it = FindIgnoringCase(AUDIO_OUTPUTS, value);
+			    if (it == AUDIO_OUTPUTS.end()) {
+				    return invalid();
+			    }
+			    cfg.audio_output =
+			        static_cast<Config::AudioOutput>(std::distance(AUDIO_OUTPUTS.begin(), it));
 		    } else {
 			    std::remove_cvref_t<decltype(cfg.*kind.field)> number {};
 			    if (!ParseNumber(value, number) || number < kind.min || number > kind.max) {
