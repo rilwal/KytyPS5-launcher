@@ -178,6 +178,10 @@ void TestSettings() {
 	Check(Launcher::Settings::Apply(cfg, "audio-output", std::nullopt).empty() &&
 	          cfg.audio_output == Config::AudioOutput::TV,
 	      "the audio output goes back to the TV");
+	Check(Launcher::Settings::Apply(cfg, "audio-3d", "true").empty() && cfg.audio_3d_enabled,
+	      "3D audio applies");
+	Check(Launcher::Settings::Apply(cfg, "audio-3d", std::nullopt).empty() && !cfg.audio_3d_enabled,
+	      "3D audio is off by default");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
 	for (const char* key: {"perf-overlay", "resolution", "fullscreen", "stretch", "present-mode",
 	                       "vblank-frequency", "hide-cursor", "tessellation", "sync-raw-image-buffers",
@@ -188,7 +192,7 @@ void TestSettings() {
 	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
 	                       "emulate-psn", "console-language", "user-name", "flush-draws",
 	                       "pssr-upscaler", "native-rt", "dlss-folder", "dlss-preset",
-	                       "fsr-folder", "audio-output"}) {
+	                       "fsr-folder", "audio-output", "audio-3d"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }

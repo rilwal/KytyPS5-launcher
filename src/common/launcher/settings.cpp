@@ -192,6 +192,9 @@ const std::array ENTRIES = {
     Entry {"audio-output", "Audio output", "System", AudioOutputChoice {},
            "The audio device games are told they play through: TV, AVReceiver (7.1), SoundBar "
            "(5.1) or Headphones."},
+    Entry {"audio-3d", "3D audio", "System", Toggle {&ConfigOptions::audio_3d_enabled},
+           "Let games pick their 3D audio mix (rendered with HRTF when the audio output is "
+           "Headphones)."},
     Entry {"network-connected", "Network", "System", Toggle {&ConfigOptions::network_connected},
            "Use the host's local network.", true},
     Entry {"emulate-psn", "Simulate PSN sign-in", "System",
