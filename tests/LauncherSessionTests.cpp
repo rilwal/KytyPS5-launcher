@@ -170,6 +170,14 @@ void TestSettings() {
 	Check(Launcher::Settings::Apply(cfg, "readback-storage-images", "true").empty() &&
 	          cfg.readback_storage_images,
 	      "storage image readback applies");
+	Check(Launcher::Settings::Apply(cfg, "audio-output", "soundbar").empty() &&
+	          cfg.audio_output == Config::AudioOutput::SoundBar &&
+	          !Launcher::Settings::Apply(cfg, "audio-output", "Speakers").empty() &&
+	          cfg.audio_output == Config::AudioOutput::SoundBar,
+	      "audio outputs apply in any case, as on the command line, and others are refused");
+	Check(Launcher::Settings::Apply(cfg, "audio-output", std::nullopt).empty() &&
+	          cfg.audio_output == Config::AudioOutput::TV,
+	      "the audio output goes back to the TV");
 	Check(Launcher::Settings::Apply(cfg, "no-such-setting", "1") != "", "unknown keys are refused");
 	for (const char* key: {"perf-overlay", "resolution", "fullscreen", "stretch", "present-mode",
 	                       "vblank-frequency", "hide-cursor", "tessellation", "sync-raw-image-buffers",
@@ -180,7 +188,7 @@ void TestSettings() {
 	                       "occlusion-queries", "readback-linear-images", "readback-storage-images",
 	                       "emulate-psn", "console-language", "user-name", "flush-draws",
 	                       "pssr-upscaler", "native-rt", "dlss-folder", "dlss-preset",
-	                       "fsr-folder"}) {
+	                       "fsr-folder", "audio-output"}) {
 		Check(!Launcher::Settings::IsLive(key), "settings read at boot wait for the next one");
 	}
 }
