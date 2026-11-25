@@ -2139,7 +2139,7 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test) {
           "translated resources could not be materialized");
   auto result = ShaderRecompiler::CompileProgram(
       std::move(translated), options, specialization,
-      {.begin = static_cast<u32>(pixel_info.object_primitive_id)});
+      ShaderRecompiler::IR::PushData::GraphicsWindow(false, pixel_info.object_primitive_id));
   Require(test.name, "SPIR-V emit", !result.spirv.empty(),
           "recompiler returned empty SPIR-V");
   ValidateSpirv(test.name, result.spirv);
@@ -8012,7 +8012,10 @@ public:
       std::vector<u32> mip_guest(0x2000 / sizeof(u32));
       std::iota(mip_guest.begin(), mip_guest.end(), 0x51000000u);
       ImageId previous{};
-      for (const uint32_t width : {32u, 64u, 32u}) {
+      // Change both extent and physical mip count at one guest address. The 64-wide
+      // chain shifts mip zero by a tile; the 32-wide chain shifts it within a tile.
+      for (const auto [width, levels] : {std::pair{32u, 7u}, {64u, 7u}, {64u, 1u},
+                                         {64u, 7u}, {32u, 7u}, {32u, 1u}, {32u, 7u}}) {
         if (previous) {
           Require(name, "mip-layout CPU overwrite",
                   resources.HandleFault(PageFaultAccess::Write,
@@ -8027,9 +8030,9 @@ public:
                 TileGetTiledTextureLayout(
                     {.format = Prospero::BufferFormat::kBc3Srgb,
                      .tile_mode = Prospero::TileMode::kStandard4KB,
-                     .width = width, .height = 64, .levels = 7}, surface, mips) &&
-                    surface.first_tail_level == (width == 32 ? 0u : 1u) &&
-                    surface.total_size == (width == 32 ? 0x1000u : 0x2000u),
+                     .width = width, .height = 64, .levels = levels}, surface, mips) &&
+                    surface.first_tail_level == (width == 32 && levels > 1 ? 0u : 1u) &&
+                    surface.total_size == (width == 64 && levels > 1 ? 0x2000u : 0x1000u),
                 "BC3 width change did not move mip zero into or out of the tail");
         ImageDesc desc{};
         desc.type = BindingType::Texture;
@@ -8037,18 +8040,18 @@ public:
         desc.info.pixel_format = vk::Format::eBc3SrgbBlock;
         desc.info.guest_format = Prospero::BufferFormat::kBc3Srgb;
         desc.info.extent = {width, 64, 1};
-        desc.info.resources = {7, 1};
+        desc.info.resources = {levels, 1};
         desc.info.pitch = 64;
         desc.info.bytes_per_block = 16;
         desc.info.tile_mode = Prospero::TileMode::kStandard4KB;
         desc.view_info.format = desc.info.pixel_format;
         desc.view_info.type = vk::ImageViewType::e2D;
-        desc.view_info.level_count = 7;
+        desc.view_info.level_count = levels;
         desc.view_info.aspect = vk::ImageAspectFlagBits::eColor;
         desc.view_info.usage = vk::ImageUsageFlagBits::eSampled;
         std::vector<vk::BufferImageCopy> copies;
         std::vector<u32> expected;
-        for (uint32_t level = 0; level < 7; level++) {
+        for (uint32_t level = 0; level < levels; level++) {
           const auto &layout = mips[level];
           desc.info.mip_layout[level] = {layout.offset, layout.size,
                                          layout.pitch, layout.height};
@@ -8091,8 +8094,8 @@ public:
                 ReadBuffer(name, readback, expected.size()) == expected,
                 "cached native copying contaminated the requested guest mip layout");
         DestroyBuffer(&readback);
-        if (width == 64) {
-          // Leave only the larger backing so shrinking must reject its layout.
+        if (previous) {
+          // Force the next lookup to resolve against the current layout.
           TextureCacheTestAccess::DeleteImage(texture_cache, previous);
         }
         previous = id;
@@ -16341,7 +16344,8 @@ public:
   void CheckCubeFaceStorage() {
     constexpr const char *name = "CubeFaceStorage";
     constexpr uintptr_t base = 0x0000000204700000ull;
-    constexpr uint64_t allocation_size = 0x10000;
+    constexpr uint64_t tile_size = 0x10000;
+    constexpr uint64_t allocation_size = (1 + 2 * 6) * tile_size;
     constexpr std::array<uint32_t, 6> half_red{0x3c00, 0x4000, 0x4200,
                                              0x4400, 0x4500, 0x4600};
     EnsureRuntimeContext();
@@ -16349,13 +16353,13 @@ public:
     Require(name, "direct allocation",
             Libs::LibKernel::Memory::KernelAllocateDirectMemory(
                 0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
-                allocation_size, allocation_size, 0, &direct_offset) == 0,
+                allocation_size, tile_size, 0, &direct_offset) == 0,
             "cube-face allocation failed");
     void *mapped = reinterpret_cast<void *>(base);
     Require(name, "direct mapping",
             Libs::LibKernel::Memory::KernelMapDirectMemory(
                 &mapped, allocation_size, 0x3, 0x10, direct_offset,
-                allocation_size) == 0 && mapped == reinterpret_cast<void *>(base),
+                tile_size) == 0 && mapped == reinterpret_cast<void *>(base),
             "cube-face mapping failed");
     std::memset(mapped, 0, allocation_size);
     {
@@ -16435,6 +16439,84 @@ public:
           }
         }
       }
+      // Planet Zoo writes an 8x8 packed-float array, then copies its faces through
+      // packed-UInt descriptors with DEPTH and BASE_ARRAY both set to the face.
+      ShaderRecompiler::IR::DescriptorValue packed{};
+      packed.dword_count = 8;
+      packed.dwords = {
+          static_cast<uint32_t>((base + tile_size) >> 8u),
+          (static_cast<uint32_t>(Prospero::BufferFormat::k11_11_10Float) << 20u) | (3u << 30u),
+          0x0001c001u,
+          (static_cast<uint32_t>(Prospero::ImageType::kColor2DArray) << 28u) |
+              (static_cast<uint32_t>(Prospero::TileMode::kStandard64KB) << 20u) | DstSel(4, 5, 6, 7),
+          5, 0x00700000u, 0, 0};
+      ShaderRecompiler::IR::ImageResource array_resource{};
+      array_resource.resource_class = ShaderRecompiler::IR::ImageResourceClass::Storage;
+      array_resource.numeric_class = Prospero::TextureNumericClass::Float;
+      array_resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
+      array_resource.written = true;
+      const auto owner = RenderExecutorTestAccess::ResolveTexture(executor, array_resource, packed);
+      Require(name, "packed array backing", owner.image_id &&
+                  cache.GetImage(owner.image_id).backing.layers == 6 &&
+                  cache.GetImage(owner.image_id).backing.format == vk::Format::eB10G11R11UfloatPack32 &&
+                  cache.FindTexture(owner.image_id, owner.desc) != nullptr,
+              "packed float array did not create its six-layer native image");
+
+      ShaderRecompiler::IR::ImageResource face_resource{};
+      face_resource.numeric_class = Prospero::TextureNumericClass::Uint;
+      face_resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+      face_resource.conversion_format = Prospero::BufferFormat::k11_11_10UInt;
+      auto packed_face = packed;
+      packed_face.dwords[1] =
+          (static_cast<uint32_t>(face_resource.conversion_format) << 20u) | (3u << 30u);
+      for (uint32_t face = 0; face < 6; ++face) {
+        packed_face.dwords[4] = face | (face << 16u);
+        for (bool storage : {false, true}) {
+          face_resource.resource_class = storage ? ShaderRecompiler::IR::ImageResourceClass::Storage
+                                                 : ShaderRecompiler::IR::ImageResourceClass::Sampled;
+          face_resource.read = !storage;
+          face_resource.written = storage;
+          const auto binding = RenderExecutorTestAccess::ResolveTexture(executor, face_resource, packed_face);
+          const auto &view = binding.desc.view_info;
+          Require(name, "packed face view", binding.image_id == owner.image_id &&
+                      view.format == vk::Format::eR32Uint && view.type == vk::ImageViewType::e2D &&
+                      view.base_layer == face && view.layer_count == 1 &&
+                      cache.FindTexture(binding.image_id, binding.desc) != nullptr,
+                  std::string(storage ? "storage" : "sampled") + " view of face " +
+                      std::to_string(face) + " did not select the packed array layer");
+        }
+      }
+
+      // The destination can first appear as a one-layer UInt image. Its GPU
+      // contents must survive the subsequent six-layer float descriptor.
+      packed.dwords[0] = packed_face.dwords[0] = static_cast<uint32_t>((base + 7 * tile_size) >> 8u);
+      packed_face.dwords[4] = 0;
+      face_resource.resource_class = ShaderRecompiler::IR::ImageResourceClass::Storage;
+      face_resource.read = false;
+      face_resource.written = true;
+      const auto first = RenderExecutorTestAccess::ResolveTexture(executor, face_resource, packed_face);
+      Require(name, "one-layer UInt destination", first.image_id &&
+                  cache.FindTexture(first.image_id, first.desc) != nullptr &&
+                  cache.GetImage(first.image_id).backing.layers == 1 &&
+                  cache.GetImage(first.image_id).backing.format == vk::Format::eR32Uint,
+              "first destination face did not bind a one-layer raw image");
+      constexpr uint32_t texel = 0x781c03c0u;
+      vk::ClearValue clear{};
+      clear.color.uint32[0] = texel;
+      TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), first.image_id,
+          {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, clear);
+      array_resource.resource_class = ShaderRecompiler::IR::ImageResourceClass::Sampled;
+      array_resource.read = true;
+      array_resource.written = false;
+      const auto grown = RenderExecutorTestAccess::ResolveTexture(executor, array_resource, packed);
+      Require(name, "sampled float array after raw write", grown.image_id &&
+                  grown.desc.view_info.format == vk::Format::eB10G11R11UfloatPack32 &&
+                  grown.desc.view_info.layer_count == 6 &&
+                  cache.FindTexture(grown.image_id, grown.desc) != nullptr &&
+                  ReadCachedTexel(name, context, grown.image_id) == std::vector<u32>{texel} &&
+                  ReadCachedTexel(name, context, grown.image_id, {}, {1, 1, 1}, 5) ==
+                      std::vector<u32>{0},
+              "float array growth lost the GPU-written face or failed to initialize the last face");
       RenderExecutorTestAccess::ResetBindings(executor);
       context.UnmapMemory(base, allocation_size);
       scheduler.Finish();
@@ -22566,7 +22648,8 @@ public:
               EncodeVop2(0x16, 11, InlineU32(18), 0), EncodeVop2(0x1a, 11, InlineU32(10), 11),
               EncodeVop2(0x1c, 10, Vgpr(11), 10), EncodeVop2(0x16, 11, InlineU32(2), 1),
               EncodeVop2(0x1a, 11, InlineU32(20), 11), EncodeVop2(0x1c, 10, Vgpr(11), 10),
-              EncodeExp0(0x14, 0x1, false), EncodeExp1(10, 0, 0, 0),
+              EncodeVop2(0x25, 12, InlineU32(37), 2),
+              EncodeExp0(0x14, 0x3, false), EncodeExp1(10, 12, 0, 0),
               EncodeVop2(0x25, 5, 8, 5), EncodeVop2(0x25, 8, 9, 8)};
           AppendVMovLiteral(&code, 1, 0xbf800000u);
           AppendVMovLiteral(&code, 2, 0x40400000u);
@@ -22662,7 +22745,28 @@ public:
         // The patched SGPRs replace user data 0/0 with the records' bases.
         shaders.SetGsUserSgpr(0, 0);
         shaders.SetGsUserSgpr(1, 0);
+        auto gs_resources = shaders.GetVs().gs_regs.rsrc1;
+        gs_resources.gs_vgpr_component_count = 2;
+        shaders.SetGsShaderResource1(gs_resources);
+        registers.SetPrimitiveIdEnable(true);
+        registers.SetColorBase(7, {.addr = depth_address + 0x2c000});
+        registers.SetColorInfo(7, {.format = Prospero::ChannelLayout::k32,
+                                   .channel_type = Prospero::ChannelType::kUInt});
+        registers.SetColorAttrib2(7, registers.GetRenderTarget(3).attrib2);
+        registers.SetColorAttrib3(7, registers.GetRenderTarget(3).attrib3);
+        registers.SetRenderTargetMask(0xf000f000);
+        registers.SetDrawPayloadControl(9);
+        registers.SetObjprimIdControl(2);
+        user_config.SetObjectId(0x1ffff);
         check("indexed subgroups", true, 0, 2, {0, 1});
+        RenderColorInfo ids{};
+        RenderExecutorTestAccess::ResolveRenderColorTarget(executor, scheduler.Current(), ids, 7);
+        const auto id_pixels = ReadCachedTexel(name, context, ids.image_id, {}, {extent, extent, 1});
+        Require("GpuMeshIndirectDraw", "register and exported primitive ID",
+                std::ranges::all_of(id_pixels, [](u32 id) { return id == 0x1ffff + 37 + 2; }),
+                "RT7 did not add the register object ID to the mesh primitive payload");
+        registers.SetDrawPayloadControl(0);
+        registers.SetRenderTargetMask(0xf000);
         check("first index and instances", true, 2, 1, {0, 1});
         check("auto subgroups", false, 4, 2, {0, 1});
         // Index reads stop at INDEX_BUFFER_SIZE: two of the record's three indices remain.
@@ -23221,7 +23325,7 @@ public:
       if (push_constant_range.size != 0) {
         ShaderRecompiler::IR::PushData push_data;
         if (object_id) {
-          push_data.dwords[0] = test.object_ids[draw];
+          push_data.dwords[ShaderRecompiler::IR::PushData::ObjectIdDword] = test.object_ids[draw];
         }
         if (fragment_bind.UsesPushData()) {
           std::copy(test.push_constants.begin(), test.push_constants.end(),
@@ -37540,6 +37644,63 @@ TestCase BufferLoadDwordGpuSelectedDescriptors() {
   return BufferLoadsGpuSelectedDescriptors(1u);
 }
 
+TestCase BufferStoreWorkgroupDescriptors(u32 groups, u32 components = 1u) {
+  TestCase test;
+  test.name = components == 4u ? "BufferStoreDwordx4PaddedDescriptors"
+            : components == 2u && groups == 1u ? "BufferStoreDwordx2SingleGuardedWorkgroup"
+            : components == 2u ? "BufferStoreDwordx2WorkgroupDescriptors"
+            : groups == 1u ? "BufferStoreOneWorkgroupDescriptor" : "BufferStoreTwoWorkgroupDescriptors";
+  test.has_user_data = test.has_compute_info = true;
+  test.user_data[0] = 128u;
+  test.compute_info.workgroup_register = 10u;
+  test.compute_info.group_id[2] = true;
+  test.compute_info.wave_size = test.compute_info.threads_num[0] = 32u;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1u;
+  test.compute_info.thread_ids_num = 1u;
+  test.dispatch_z = groups;
+  auto &code = test.code;
+  u32 key = 10u;
+  if (components == 2u) code = {EncodeSopc(0x0a, key, InlineU32(2)), 0u};
+  if (components == 4u) {
+    test.user_data[6] = 2u;
+    // Lane zero selects the group row. Other lanes have different local selectors.
+    code = {EncodeVop2(0x1d, 6, key, 0), EncodeVopc(0xc4, 6, 6),
+            EncodeVop2(0x01, 7, InlineU32(0), 6), EncodeVop1(0x02, 11, Vgpr(7))};
+    key = 11u;
+  }
+  code.insert(code.end(), {EncodeSop2(0x31, 4, key, 255), 0x2a0u,
+      EncodeSmem0(0x02, 12), EncodeSmem1(0u, 4), EncodeSopp(0x0c, 0),
+      EncodeVop1(0x01, 2, 10)});
+  for (u32 word = 1u; word < components; ++word)
+    code.push_back(EncodeVop1(0x01, 2u + word, InlineU32(6u + word)));
+  const u32 opcode = components == 4u ? 0x1eu : components == 2u ? 0x1du : 0x1cu;
+  const u32 field_offset = components == 4u ? 8u : 0u;
+  code.insert(code.end(), {EncodeMubuf0(opcode, field_offset, true, false), EncodeMubuf1(2, 3, 0)});
+  if (components == 2u) code[1] = EncodeSopp(0x04, code.size() - 2u);
+  AppendEnd(&code);
+  test.initial.assign(2064u, 0xdeadbeefu);
+  const u32 stride = components == 4u ? 32u : components * 4u;
+  test.expected_buffer_resources.emplace();
+  for (u32 row = 0; row < std::min(groups, 2u); ++row) {
+    const u32 output = 4096u * (row + 1u);
+    const std::array descriptor{output, stride << 16u, 2u, 0x5204u};
+    std::copy(descriptor.begin(), descriptor.end(),
+              test.initial.begin() + (test.user_data[0] + 0x2a0u + row * 16u) / 4u);
+    test.expected_buffer_resources->push_back(row);
+    const u32 bytes = components > 1u && row == 1u ? stride + field_offset + (components - 1u) * 4u : 2u * stride;
+    test.storage_buffer_ranges.emplace_back(output, bytes);
+  }
+  test.expected = test.initial;
+  for (const auto &[output, bytes] : test.storage_buffer_ranges)
+    for (u32 record = 0; record < 2u; ++record)
+      for (u32 component = 0; component < components; ++component) {
+        const u32 offset = record * stride + field_offset + component * 4u;
+        if (offset < bytes)
+          test.expected[(output + offset) / 4u] = component == 0u ? output / 4096u - 1u : 6u + component;
+      }
+  return test;
+}
+
 TestCase BufferLoadGpuSelectedDescriptors(u32 wave, ShaderOpcode load) {
   using O = ShaderOpcode;
   const bool formatted = load == O::BUFFER_LOAD_FORMAT_X;
@@ -50347,6 +50508,9 @@ std::vector<TestCase> MakeCases() {
   AddCase(BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail);
   AddCase(BufferLoadsGpuSelectedDescriptors);
   AddCase(BufferLoadDwordGpuSelectedDescriptors);
+  cases.push_back(BufferStoreWorkgroupDescriptors(2u, 4u));
+  for (u32 groups : {1u, 3u}) cases.push_back(BufferStoreWorkgroupDescriptors(groups, 2u));
+  for (u32 groups : {1u, 2u}) cases.push_back(BufferStoreWorkgroupDescriptors(groups));
   AddCase(BufferLoadDwordx3GpuSelectedDescriptors);
   AddCase(BufferLoadFormatXGpuSelectedDescriptors);
   AddCase(BufferLoadFormatXGpuSelectedDescriptors64);
@@ -58335,6 +58499,9 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
     RunCase(&vulkan, ScalarBufferFromLoopReadlane(64));
     CheckBoundedFormattedBufferCopy(vulkan);
+    RunCase(&vulkan, BufferStoreWorkgroupDescriptors(2u, 4u));
+    for (u32 groups : {1u, 3u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups, 2u));
+    for (u32 groups : {1u, 2u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups));
     CheckFiniteBufferSelection(vulkan);
     CheckIndirectBufferStore(vulkan);
     CheckBoundedRecordBufferAccess(vulkan);

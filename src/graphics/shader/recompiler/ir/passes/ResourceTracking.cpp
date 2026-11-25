@@ -1665,7 +1665,7 @@ private:
 			if (read->Arg(1).Resolve() == Value(0u)) value = read->Arg(0);
 			else if (read->Arg(0).Resolve() == Value(0u)) value = read->Arg(1);
 			else return nullptr;
-			selector.non_negative = true;
+			selector.zero_above = INT32_MAX;
 			read = ActiveValue(value, active).TryInstruction();
 		}
 		if (read != nullptr && read->GetOpcode() == ValueOpcode::BitFieldUExtract) {
@@ -1698,39 +1698,76 @@ private:
 		if (memory.kind != ResourceKind::Buffer || memory.typed || memory.formatted ||
 		    !memory.idxen || memory.offen || memory.offset > UINT32_MAX - lane * 4u ||
 		    read->Arg(2).Resolve() != Value(0u) || read->Arg(3).Resolve() != Value(0u) ||
-		    !EquivalentValue(m_program, active, read->Arg(4))) return nullptr;
+		    !Implies(active, read->Arg(4))) return nullptr;
 		selector.offset = memory.offset + lane * 4u;
 		return read;
 	}
 
+	// Predicated writes and SSA joins may retain the original material field or zero.
+	// The outer unsigned check bounds every nonzero field used by this waterfall.
+	const Inst* GuardedMaterialField(const Inst* select, Value active,
+	                                DescriptorSource::IndirectDescriptor::SelectorRead& selector) const {
+		uint32_t limit;
+		if (select == nullptr || select->GetOpcode() != ValueOpcode::SelectU32 ||
+		    select->Arg(2).Resolve() != Value(0u) ||
+		    !ImmediateU32(UnsignedBound(select->Arg(0), select->Arg(1)), limit) || limit == 0u) return nullptr;
+		const Inst* field = nullptr;
+		std::vector<Value> pending {select->Arg(1)};
+		for (size_t i = 0; i < pending.size(); ++i) {
+			auto value = pending[i].Resolve();
+			if (value == Value(0u)) continue;
+			const auto* inst = value.TryInstruction();
+			if (inst == nullptr || inst->Parent() == nullptr || InCycle(inst->Parent())) return nullptr;
+			const bool phi = inst->GetOpcode() == ValueOpcode::Phi;
+			if (phi && inst->NumArgs() == 0u) return nullptr;
+			if (!phi && inst->GetOpcode() != ValueOpcode::SelectU32) {
+				if (field != nullptr && field != inst) return nullptr;
+				field = inst;
+				continue;
+			}
+			const auto end = !phi && Implies(active, inst->Arg(0)) ? 2u : inst->NumArgs();
+			for (size_t arm = phi ? 0u : 1u; arm < end; ++arm) {
+				value = inst->Arg(arm).Resolve();
+				if (std::ranges::find(pending, value) == pending.end()) pending.push_back(value);
+			}
+		}
+		selector.zero_above = limit - 1u;
+		return field;
+	}
+
+	enum class MaterialKey { Global, Indexed, Heap, Guarded };
+
 	bool MatchUniformizedMaterialKey(Value key, const Inst& image,
 	                                DescriptorSource::IndirectDescriptor& indirect,
-	                                DescriptorSource& material_source, bool indexed, bool heap = false) {
+	                                DescriptorSource& material_source, MaterialKey kind) {
+		if (m_program.stage != ShaderType::Compute &&
+		    (kind == MaterialKey::Indexed || kind == MaterialKey::Heap)) return false;
 		const auto* selected = UniformizedMaterialValue(key, image);
 		if (selected == nullptr) return false;
 		const auto active = selected->Arg(0).Resolve();
 		DescriptorSource::IndirectDescriptor::SelectorRead selector;
-		const auto* read = SelectorReadValue(selected->Arg(1), active, selector);
-		if (indexed) {
+		const auto* read = kind == MaterialKey::Guarded
+		    ? GuardedMaterialField(selected->Arg(1).Resolve().TryInstruction(), active, selector)
+		    : SelectorReadValue(selected->Arg(1), active, selector);
+		if (kind != MaterialKey::Global) {
 			read = IndexedMaterialRead(read, active, selector);
 			// Bounded heaps keep their full domain when the material may alias a write: written
 			// buffers are checked at dispatch, storage images and address writes here. Pointer
 			// tables have no such domain, so a key that a same-dispatch write changes selects
-			// the root descriptor. Other stages keep the original domain.
-			if (read == nullptr || m_program.stage != ShaderType::Compute ||
-			    (heap && std::ranges::any_of(m_program.blocks, [](const Block* block) {
+			// the root descriptor. Graphics heaps retain their full domain.
+			if (read == nullptr ||
+			    (kind == MaterialKey::Heap && std::ranges::any_of(m_program.blocks, [](const Block* block) {
 				    return std::ranges::any_of(*block, [](const Inst& inst) {
 					    const auto op = inst.GetOpcode();
 					    return ImageOpcodeInfoOf(op).resource_class == ImageResourceClass::Storage ||
 					           AddressOpcodeInfoOf(op).access == AddressAccess::Write;
 				    });
 			    })) || !MakeRuntimeTableSource(*read, material_source)) return false;
-			// The record index is assumed not to wrap U32; an affine one then reaches only
-			// records offset + k * stride.
+			// Wrapped U32 indices preserve the stride's power-of-two congruence class.
 			AffineOffset row;
 			if (MatchAffineOffset(read->Arg(1), active, row) && row.stride != 0u) {
-				selector.first_record = static_cast<uint32_t>(row.offset);
-				selector.record_step = static_cast<uint32_t>(row.stride);
+				selector.record_step = 1u << std::countr_zero(static_cast<uint32_t>(row.stride));
+				selector.first_record = static_cast<uint32_t>(row.offset) % selector.record_step;
 			}
 			selector.source = InternSource(material_source);
 			indirect.selector = std::move(selector);
@@ -2962,24 +2999,27 @@ private:
 
 	bool IndirectBufferAccess(const Inst& inst) const {
 		const auto opcode = inst.GetOpcode();
-		if (opcode != ValueOpcode::StoreBufferU32 && opcode != ValueOpcode::StoreBufferU8 &&
+		if (opcode != ValueOpcode::StoreBufferU32 && opcode != ValueOpcode::StoreBufferU32x2 &&
+		    opcode != ValueOpcode::StoreBufferU8 &&
 		    opcode != ValueOpcode::StoreBufferU32x4 && opcode != ValueOpcode::LoadBufferU32x2 &&
 		    opcode != ValueOpcode::LoadBufferU32x3 && opcode != ValueOpcode::LoadBufferU32x4) return false;
 		const auto index = inst.Flags<MemoryFlags>().index;
 		if (index >= m_program.memory_info.size()) return false;
 		const auto& memory = m_program.memory_info[index];
-		if (memory.kind != ResourceKind::Buffer || memory.typed || memory.idxen == memory.offen ||
-		    (memory.idxen && (memory.offset != 0u || inst.Arg(2).Resolve() != Value(0u))) ||
+		if (memory.kind != ResourceKind::Buffer || memory.typed || (memory.idxen && memory.offen) ||
+		    (memory.idxen && inst.Arg(2).Resolve() != Value(0u)) ||
 		    inst.Arg(3).Resolve() != Value(0u)) return false;
+		if (memory.idxen && memory.offset != 0u &&
+		    (memory.formatted || memory.data_bits != 32u || (memory.offset & 3u) != 0u)) return false;
 		if (opcode == ValueOpcode::StoreBufferU32)
 			return !memory.formatted || (memory.idxen && memory.data_bits == 32u && memory.data_dwords == 1u);
 		if (!memory.idxen) return false;
 		if (opcode == ValueOpcode::StoreBufferU8)
 			return !memory.formatted && memory.data_bits == 8u;
-		if (opcode == ValueOpcode::StoreBufferU32x4)
-			return memory.formatted && memory.data_bits == 32u && memory.data_dwords == 4u &&
-			       memory.component_count == 4u;
 		const auto components = BufferComponentCount(opcode);
+		if (opcode == ValueOpcode::StoreBufferU32x2 || opcode == ValueOpcode::StoreBufferU32x4)
+			return memory.data_bits == 32u && memory.data_dwords == components &&
+			       (!memory.formatted || (components == 4u && memory.component_count == 4u));
 		return memory.formatted && memory.data_dwords == components &&
 		       ((memory.data_bits == 32u && memory.component_count == components) ||
 		        (opcode == ValueOpcode::LoadBufferU32x2 && memory.data_bits == 16u &&
@@ -3295,7 +3335,7 @@ private:
 			// the GPU key using the same plan as other indirect image reads.
 			plan.retain_reads |= table_source.dword_count == 4u;
 		} else if (!sampler && !plan.table_indexed && table_source.dword_count == 4u &&
-		           MatchUniformizedMaterialKey(key, handle, indirect, material_source, true, true)) {
+		           MatchUniformizedMaterialKey(key, handle, indirect, material_source, MaterialKey::Heap)) {
 			// Preserve the heap's byte-offset key so runtime geometry can choose the
 			// tighter selector domain without changing the GPU's descriptor reads.
 			indirect.table_scalar = true;
@@ -3350,8 +3390,8 @@ private:
 				}
 			}
 			if (indirect.key_count.IsEmpty() &&
-			    !MatchUniformizedMaterialKey(key, handle, indirect, material_source, false) &&
-			    !MatchUniformizedMaterialKey(key, handle, indirect, material_source, true) &&
+			    !MatchUniformizedMaterialKey(key, handle, indirect, material_source, MaterialKey::Global) &&
+			    !MatchUniformizedMaterialKey(key, handle, indirect, material_source, MaterialKey::Indexed) &&
 			    !MatchReversedImageRange(key, indirect) && !MatchWorkgroupKey(key, indirect)) {
 				auto maximum = SelectorMaximum(key);
 				if (maximum >= MaxIndirectDescriptorProbes) {
@@ -3380,7 +3420,8 @@ private:
 					plan.retain_reads = true;
 				} else if (maximum < MaxIndirectDescriptorProbes)
 					indirect.key_count = Value(maximum + 1u);
-				else if (!ProgramLoopCount(key, indirect))
+				else if (!ProgramLoopCount(key, indirect) && (sampler ||
+				         !MatchUniformizedMaterialKey(key, handle, indirect, material_source, MaterialKey::Guarded)))
 					return false;
 			}
 			if ((table_offset & 3u) != 0u) return false;
@@ -3493,6 +3534,56 @@ private:
 		return true;
 	}
 
+	// A lane may retain a previously selected row across loop iterations. Each assignment
+	// must supply either zero or a value explicitly checked against the same uniform count.
+	Value GuardedLaneCount(Value key, uint32_t maximum) {
+		const auto* lane = key.Resolve().TryInstruction();
+		if (lane == nullptr || lane->GetOpcode() != ValueOpcode::ReadFirstLane) return {};
+		auto selected = lane->Arg(0).Resolve();
+		uint32_t limit = maximum == UINT32_MAX ? UINT32_MAX : maximum + 1u;
+		while (const auto* choice = selected.TryInstruction()) {
+			if (choice->GetOpcode() != ValueOpcode::SelectU32 || choice->Arg(2).Resolve() != Value(0u))
+				break;
+			const auto bound = UnsignedBound(choice->Arg(0), choice->Arg(1));
+			uint32_t immediate;
+			if (!bound.IsEmpty()) {
+				if (!ImmediateU32(bound, immediate)) break;
+				limit = std::min(limit, immediate);
+			}
+			selected = choice->Arg(1).Resolve();
+		}
+		Value count;
+		std::vector<Value> pending {selected};
+		for (size_t i = 0; i < pending.size(); ++i) {
+			if (pending[i] == Value(0u)) continue;
+			const auto* choice = pending[i].TryInstruction();
+			if (choice == nullptr) return {};
+			const bool select = choice->GetOpcode() == ValueOpcode::SelectU32;
+			if (!select && (choice->GetOpcode() != ValueOpcode::Phi || choice->NumArgs() == 0u)) return {};
+			for (size_t arm = select ? 1u : 0u; arm < choice->NumArgs(); ++arm) {
+				const auto value = choice->Arg(arm).Resolve();
+				const auto bound = select ? UnsignedBound(choice->Arg(0), value, arm == 1u) : Value {};
+				if (!bound.IsEmpty() && value != Value(0u)) {
+					if (!ValidateRuntimeValue(m_program, bound, RuntimeValueType::Integer) ||
+					    (!count.IsEmpty() && !EquivalentValue(m_program, count, bound))) return {};
+					count = bound;
+				} else if (std::ranges::find(pending, value) == pending.end()) {
+					pending.push_back(value);
+				}
+			}
+		}
+		if (count.IsEmpty()) return {};
+		const auto adjust = [&](ValueOpcode op, uint32_t immediate) {
+			auto& node = m_program.value_storage.emplace_back(op);
+			node.SetArg(0, count);
+			node.SetArg(1, Value(immediate));
+			count = Value(&node);
+		};
+		if (limit != UINT32_MAX) adjust(ValueOpcode::UMin32, limit);
+		adjust(ValueOpcode::UMax32, 1u);
+		return count;
+	}
+
 	bool TryMakeIndirectBuffer(Inst& handle, const DescriptorSource& descriptor,
 	                           IndirectDescriptorPlan& plan) {
 		if (handle.GetOpcode() != ValueOpcode::GetBufferResource || handle.NumArgs() != 4u ||
@@ -3558,16 +3649,17 @@ private:
 			plan.retain_reads = true;
 			return finish();
 		}
+		const auto axis = table_source.dword_count == 2u ? WorkgroupAxis(key) : UINT32_MAX;
+		if (!plan.split_offsets && (!legacy_store || axis != UINT32_MAX)) {
+			indirect.workgroup_axis = axis;
+			indirect.key_count = UnsignedResourceBound(key, handle);
+			if (axis != UINT32_MAX || !indirect.key_count.IsEmpty()) return finish();
+		}
 		if (!legacy_store) {
-			if (!plan.split_offsets) {
-				const auto count = UnsignedResourceBound(key, handle);
-				if (!count.IsEmpty()) {
-					indirect.key_count = count;
-					return finish();
-				}
-			}
 			if (table_source.dword_count == 2u && !plan.split_offsets) {
 				const auto maximum = SelectorMaximum(key);
+				indirect.key_count = GuardedLaneCount(key, maximum);
+				if (!indirect.key_count.IsEmpty()) return finish();
 				if (maximum >= MaxIndirectDescriptorProbes) return false;
 				indirect.key_count = Value(maximum + 1u);
 				return finish();

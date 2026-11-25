@@ -391,8 +391,7 @@ void TestThreadCreatedInHandlerTakesSignals() {
 
 void *KYTY_SYSV_ABI ReturnFromGuestThread(void *) { return nullptr; }
 
-// An exiting thread stops taking guest signals before it frees its TLS.
-void TestExitingThreadStopsTakingSignals() {
+void TestExitedThreadLifetime() {
   using namespace Libs::LibKernel;
   Pthread exiting = nullptr;
   Check(PthreadCreate(&exiting, nullptr, ReturnFromGuestThread, nullptr, "Exiting") == OK,
@@ -403,6 +402,15 @@ void TestExitingThreadStopsTakingSignals() {
   });
   Check(PthreadJoin(exiting, nullptr) == OK && !PthreadHasPendingSignal(exiting, 30),
         "joining clears signals the exiting thread did not take");
+
+  stop_sleepers = false;
+  auto *successor = StartSleeper();
+  const auto canceled = PthreadCancel(exiting);
+  stop_sleepers = true;
+  void *result = nullptr;
+  Check(PthreadJoin(successor, &result) == OK && result == nullptr &&
+            canceled == KERNEL_ERROR_ESRCH,
+        "canceling a joined thread leaves its successor running");
 }
 
 class TempDirectory {
@@ -951,18 +959,24 @@ void TestFsync() {
       {"juWbTNM+8hw", "Posix", "libkernel", Loader::SymbolType::Func});
   Check(symbol != nullptr, "POSIX fsync export resolves");
   const auto fsync = reinterpret_cast<int (KYTY_SYSV_ABI *)(int)>(symbol->vaddr);
+  const auto* data_sync = symbols.Find(
+      {"30Rh4ixbKy4", "libkernel", "libkernel", Loader::SymbolType::Func});
+  Check(data_sync != nullptr, "sceKernelFdatasync export resolves");
+  const auto fdatasync = reinterpret_cast<int (KYTY_SYSV_ABI *)(int)>(data_sync->vaddr);
   Check(fsync(std::numeric_limits<int>::min()) == -1 &&
             *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EBADF,
         "invalid fsync descriptor reports POSIX EBADF");
 
   constexpr char Path[] = "/savedata0/fsync.dat";
   const int fd = FileSystem::KernelOpen(Path, 0x602, 0777);
-  Check(fd >= 3 && FileSystem::KernelWrite(fd, "save", 4) == 4 && fsync(fd) == OK &&
-            FileSystem::KernelLseek(fd, 0, 1) == 4,
-        "fsync flushes a writable file without changing its offset");
+  Check(fd >= 3 && FileSystem::KernelWrite(fd, "save", 4) == 4 &&
+            fdatasync(fd) == OK && fsync(fd) == OK && FileSystem::KernelLseek(fd, 0, 1) == 4,
+        "both sync calls flush a writable file without changing its offset");
   Check(FileSystem::KernelClose(fd) == OK && fsync(fd) == -1 &&
             *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EBADF,
         "closed fsync descriptor reports POSIX EBADF");
+  Check(fdatasync(fd) == Libs::LibKernel::KERNEL_ERROR_EBADF,
+        "closed fdatasync descriptor reports the kernel error");
 
   for (const auto& [path, flags] : {std::pair {"/savedata0", 0x00020000}, std::pair {Path, 0},
                                     std::pair {"/dev/urandom", 0x2}}) {
@@ -1881,6 +1895,18 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
             "bounded write preserves all sixty-four literal bits");
     }
   }
+  reset(1, 24);
+  auto *short_batch = buffers[0].header.data();
+  std::array<char, 3> read_output {};
+  const auto append_read = [&]() {
+    return read_file(short_batch, reinterpret_cast<uint64_t>(&short_batch[3]),
+                     reinterpret_cast<uint64_t>(&short_batch[4]), file_id,
+                     read_output.data(), read_output.size(), 0);
+  };
+  Check(append_read() == OK && offset(short_batch) == 20 &&
+            append_read() == Libs::LibKernel::KERNEL_ERROR_EBUSY &&
+            offset(short_batch) == 20,
+        "APR reports a full batch so the caller can retry the pending read");
   reset(1, 768);
   std::array<std::array<char, 3>, 16> batch_output {};
   std::array<uint64_t, 16> batch_fences {};
@@ -3094,7 +3120,7 @@ int main(int argc, char** argv) {
   TestSignalWaitsForRunningHandler();
   TestSelfRaiseHoldsOtherRaises();
   TestThreadCreatedInHandlerTakesSignals();
-  TestExitingThreadStopsTakingSignals();
+  TestExitedThreadLifetime();
   if (argc == 2 && std::string_view(argv[1]) == "--mutex-only") {
     subsystems.Destroy();
     std::printf("KernelFileSystemTests: mutex cases passed\n");
