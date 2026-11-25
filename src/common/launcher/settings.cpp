@@ -205,7 +205,8 @@ const std::array ENTRIES = {
            "Skip startup logos and notices in games that support it."},
     Entry {"playgo-hack", "PlayGo chunk fallback", "System",
            Toggle {&ConfigOptions::playgo_hack_enabled},
-           "Report 1000 PlayGo chunks, not 1, for a game without chunk metadata."},
+           "Report 1000 PlayGo chunks for a game without chunk metadata, instead of telling it "
+           "PlayGo isn't available."},
     Entry {"amd-cpu", "AMD CPU patches", "System", Toggle {&ConfigOptions::amd_cpu_enabled},
            "Apply AMD CPU instruction patches."},
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
