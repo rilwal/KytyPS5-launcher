@@ -563,8 +563,6 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	                                ? Prospero::BufferFormat::k16UNorm
 	                                : descriptor.Format();
 	const auto surface_format = TextureGetSurfaceFormatInfo(format);
-	const bool shader_conversion =
-	    surface_format.conversion_format != Prospero::BufferFormat::kInvalid;
 	const bool sampled_numeric_class =
 	    storage || resource.numeric_class ==
 	                   Prospero::SampledTextureNumericClass(Prospero::RemapTextureFormat(format));
@@ -587,7 +585,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	auto          view_base    = static_cast<uint32_t>(base_level);
 	auto pixel_format = surface_format.vk_format;
 	if (resource.depth_compare) {
-		if (const auto* depth_format = FindGuestDepthFormatPolicy(format)) {
+		if (const auto* depth_format = FindGuestDepthFormatPolicy(format);
+		    depth_format && depth_format->depth_attachment_format != vk::Format::eUndefined) {
 			pixel_format = depth_format->depth_attachment_format;
 		}
 	}
@@ -654,7 +653,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 	desc.heap = resource.heap;
 
-	auto id = texture_cache.FindImage(desc, shader_conversion);
+	auto id = texture_cache.FindImage(desc);
 	if (!id) {
 		// Another extent at the address holds it; the heap retries once an image is created.
 		return {.desc = std::move(desc), .layout = vk::ImageLayout::eGeneral};

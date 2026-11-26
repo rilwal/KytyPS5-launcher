@@ -1929,6 +1929,12 @@ int KYTY_SYSV_ABI rmdir(const char* path) {
 	return POSIX_CALL(LibKernel::FileSystem::KernelRmdir(path));
 }
 
+int KYTY_SYSV_ABI rename(const char* from, const char* to) {
+	PRINT_NAME();
+
+	return POSIX_CALL(LibKernel::FileSystem::KernelRename(from, to));
+}
+
 int64_t KYTY_SYSV_ABI lseek(int d, int64_t offset, int whence) {
 	PRINT_NAME();
 
@@ -3390,6 +3396,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread) {
 	LIB_FUNC_POSIX_KERNEL("VAzswvTOCzI", FileSystem::KernelUnlink);
 	LIB_FUNC("JGMio+21L4c", Posix::mkdir);
 	LIB_FUNC_POSIX_KERNEL("c7ZnT7V1B98", Posix::rmdir);
+	LIB_FUNC_POSIX_KERNEL("NN01qLRhiqU", Posix::rename);
 	LIB_FUNC_POSIX_KERNEL("wuCroIGjt2g", FileSystem::KernelOpen);
 	LIB_FUNC_POSIX_KERNEL("bY-PO6JhzhQ", FileSystem::KernelClose);
 	LIB_FUNC_POSIX_KERNEL("FN4gaPmuFV8", FileSystem::KernelWrite);
@@ -3425,6 +3432,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
 	LIB_FUNC("NH6xARDOVv8", LibKernel::KernelGetOperationMode);
 	LIB_FUNC("fTx66l5iWIA", FileSystem::KernelFsync);
+	LIB_FUNC("30Rh4ixbKy4", FileSystem::KernelFsync); // sceKernelFdatasync
 	LIB_FUNC("uvT2iYBBnkY", LibKernel::KernelSync);
 	LIB_FUNC_POSIX_KERNEL("HoLVWNanBBc", LibKernel::getpid);
 	LIB_FUNC("9BcDykPmo1I", LibKernel::get_error_addr);

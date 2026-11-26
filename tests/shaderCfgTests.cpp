@@ -2530,6 +2530,18 @@ void TestFloatComparisonInputModes() {
     }
     Check(comparisons == 2, "comparison input-mode fixture did not translate both precisions");
   }
+
+  const auto check_graphics_keys = [](auto input) {
+    input.float_mode = 0;
+    const auto flush_key = MakeStageStaticKey(input);
+    for (const uint8_t mode : {0x40, 0x80, 0xc0}) {
+      input.float_mode = mode;
+      Check((MakeStageStaticKey(input) == flush_key) == (mode == 0x80),
+            "graphics shaders must specialize on the FP16 input denormal bit");
+    }
+  };
+  check_graphics_keys(ShaderVertexInputInfo{});
+  check_graphics_keys(ShaderPixelInputInfo{});
 }
 
 void CheckNewDecoderUnsupported(const uint32_t *shader, uint32_t words,
@@ -7327,7 +7339,7 @@ void TestGraphicsComputeGetreg() {
       program.stage = ShaderType::Compute;
       program.wave_size = wave;
       IR::Block block;
-      Frontend::Translator translator(program, &block, 1, Frontend::NoLaneSpills, false);
+      Frontend::Translator translator(program, &block, 1, Frontend::NoLaneSpills, 0xc0);
       translator.TranslateInstruction(decoded);
       Check(program.info.reads_queue_id, "GETREG did not record its queue read");
       bool wrote_vcc = false;
@@ -10502,13 +10514,13 @@ void TestAutomaticObjectPrimitiveId() {
   auto options = MakeCompileOptions(ShaderType::Pixel);
   options.input_info.pixel = &pixel;
   options.user_data = user_data;
-  const auto prefix = PushData::GraphicsDrawDwords(false, true);
-  Check(prefix == 1 && PushData::GraphicsDrawDwords(false, false) == 0 &&
-            PushData::GraphicsDrawDwords(true, false) == PushData::MeshDrawDwordCount,
-        "graphics draw data reserved an incorrect prefix");
-  for (const uint32_t start : {prefix, PushData::DwordCount}) {
-    const auto result = RecompileForTest(shader, options, {.begin = start});
-    Check(result.program.bindings.UsesPushData() == (start == prefix),
+  const auto window = PushData::GraphicsWindow(false, true);
+  Check(window.begin == 0 && window.end == PushData::ObjectIdDword &&
+            PushData::GraphicsWindow(true, true).begin == PushData::MeshDrawDwordCount,
+        "object ID and mesh draw parameters need separate push constants");
+  for (const uint32_t start : {window.begin, window.end}) {
+    const auto result = RecompileForTest(shader, options, {.begin = start, .end = window.end});
+    Check(result.program.bindings.UsesPushData() == (start == window.begin),
           "object ID changed shader-data push/spill selection");
     Check(std::ranges::any_of(result.program.info.outputs, [](const StageOutput& output) {
             return output.kind == StageOutputKind::Mrt && output.location == 0;
@@ -10524,7 +10536,7 @@ void TestAutomaticObjectPrimitiveId() {
   }
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
   pixel.target_shader_mask = 0xf0000000u;
-  ExpectFatal([&] { (void)RecompileForTest(shader, options, {.begin = prefix}); },
+  ExpectFatal([&] { (void)RecompileForTest(shader, options, window); },
               "automatic RT7 silently overlapped an explicit MRT7 export");
 #endif
 }

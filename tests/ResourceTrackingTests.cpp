@@ -3798,6 +3798,70 @@ void TestPointerTableIndexedMaterialKeys() {
         "pointer-table selector lost sorted raw keys or the OOB-zero root descriptor");
 }
 
+void TestGuardedMaterialImageKey() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  const auto make = [](bool foreign_field) {
+    Fixture f(ShaderType::Pixel);
+    auto* entry = f.block;
+    auto* other = f.AddBlock();
+    auto* merge = f.AddBlock();
+    entry->AddBranch(other);
+    entry->AddBranch(merge);
+    other->AddBranch(merge);
+    const auto index = f.Emit(ValueOpcode::LaneId);
+    const auto material = f.Buffer({f.UserData(0), f.UserData(1), f.UserData(2), f.UserData(3)});
+    const auto mapped = f.Emit(ValueOpcode::BitwiseXor32, {index, Value(1u)});
+    const auto record = f.Emit(ValueOpcode::IAdd32, {mapped, Value(UINT32_MAX)});
+    const auto field = f.Emit(ValueOpcode::LoadBufferU32, {material, record, Value(0u), Value(0u), Value(true)},
+        f.AddMemory({.kind = ResourceKind::Buffer, .offset = 4u, .idxen = true}, 0x10u));
+    const auto active = f.Emit(ValueOpcode::IEqual32, {index, Value(0u)});
+    const auto branch = f.Emit(ValueOpcode::IEqual32, {f.UserData(0), Value(0u)});
+    entry->condition = f.Emit(ValueOpcode::ConditionRef, {branch}, CFG::BranchCondition::SccNonZero);
+    entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch, .true_block = other, .false_block = merge};
+    other->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = merge};
+    merge->terminator.kind = CFG::TerminatorKind::Return;
+    const auto previous = f.Emit(ValueOpcode::SelectU32, {active, field, Value(0u)}, 0, other);
+    f.block = merge;
+    auto& phi = merge->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+    phi.AddPhiOperand(entry, foreign_field ? mapped : field);
+    phi.AddPhiOperand(other, previous);
+    const auto in_range = f.Emit(ValueOpcode::ULessThan32, {Value(&phi), Value(8u)});
+    const auto checked = f.Emit(ValueOpcode::SelectU32, {in_range, Value(&phi), Value(0u)});
+    const auto selected = f.Emit(ValueOpcode::SelectU32, {Value(true), checked, index});
+    const auto key = f.Emit(ValueOpcode::ReadFirstLane, {selected, Value(true)});
+    const auto offset = f.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)});
+    const auto table = f.Address(f.UserData(4), f.UserData(5));
+    std::array<Value, 8> words;
+    for (uint32_t i = 0; i < words.size(); ++i)
+      words[i] = f.Emit(ValueOpcode::LoadAddressU32, {table, offset, Value(0u), Value(true)},
+          f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = i * 4u}, 0x20u));
+    const auto sampler = f.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)});
+    f.Emit(ValueOpcode::ImageSampleRaw, {f.Image(words), sampler, f.ImageAddress(), Value(true)},
+        f.AddMemory({.kind = ResourceKind::Image, .image_dimension = Decoder::ImageDimension::Dim2D}, 0x28u));
+    f.PlanAndTrack();
+    return ExtractResourcePlan(f.program);
+  };
+  CheckFatal([&] { make(true); }, "not a valid runtime value",
+             "raw pointer table borrowed another Phi arm's material field");
+  const auto plan = make(false);
+  LinearTestMemory memory;
+  const uint32_t table = uint32_t(memory.base) + 0x100u;
+  const std::array<uint32_t, 6> data{uint32_t(memory.base), 8u << 16u, 1u, 0x5204u, table, 0u};
+  const SrtRuntime runtime{.user_data = data, .userdata = &memory, .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  for (const auto field : {7u, 8u, UINT32_MAX}) {
+    memory.words[1] = field;
+    memory.descriptor_reads = 0u;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              memory.descriptor_reads == (field < 8u ? 2u : 1u) &&
+              std::ranges::find(snapshot.specialization_reads,
+                  std::pair<uint64_t, uint64_t>{table + (field < 8u ? field : 0u) * 32u, 32u}) !=
+                  snapshot.specialization_reads.end(),
+          "guarded material key read the wrong texture row at the cutoff");
+  }
+}
+
 void TestImageDescriptorFields() {
   constexpr std::array<std::pair<uint32_t, uint32_t>, 5> reserved{
       {{1u, 0x20000000u}, {2u, 0x70003000u}, {4u, 0xe000e000u},
@@ -7506,6 +7570,65 @@ void TestFiniteBufferSelection() {
   }
 }
 
+void TestGuardedCarriedBufferKey() {
+  enum class Key { Carried, Bypass, Masked };
+  const auto make = [](Key kind) {
+    Fixture f;
+    const auto table = f.Address(f.UserData(0u), f.UserData(1u));
+    const auto count = f.UserData(2u);
+    const auto lane = f.Emit(ValueOpcode::LaneId);
+    Value selected;
+    if (kind == Key::Masked) {
+      const auto row = f.Emit(ValueOpcode::BitwiseAnd32, {lane, Value(1u)});
+      const auto below = f.Emit(ValueOpcode::ULessThan32, {row, count});
+      selected = f.Emit(ValueOpcode::SelectU32, {below, row, Value(0u)});
+    } else {
+      auto* entry = f.block;
+      f.block = f.AddBlock();
+      entry->AddBranch(f.block);
+      f.block->AddBranch(f.block);
+      auto& carried = f.block->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+      carried.AddPhiOperand(entry, kind == Key::Bypass ? lane : Value(0u));
+      const auto below = f.Emit(ValueOpcode::ULessThan32, {lane, count});
+      carried.AddPhiOperand(f.block, f.Emit(ValueOpcode::SelectU32, {below, lane, Value(&carried)}));
+      selected = Value(&carried);
+      if (kind == Key::Carried) {
+        const auto in_table = f.Emit(ValueOpcode::ULessThan32, {selected, Value(2u)});
+        selected = f.Emit(ValueOpcode::SelectU32, {in_table, selected, Value(0u)});
+      }
+    }
+    const auto key = f.Emit(ValueOpcode::ReadFirstLane, {selected, Value(true)});
+    const auto offset = f.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(4u)});
+    std::array<Value, 4> words;
+    for (uint32_t i = 0; i < words.size(); ++i)
+      words[i] = f.Emit(ValueOpcode::LoadAddressU32, {table, offset, Value(0u), Value(true)},
+          f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = i * 4u,
+                       .component_index = i, .component_count = 4u}, 0x10u));
+    const auto pair = f.Emit(ValueOpcode::CompositeConstructU32x2, {lane, lane});
+    f.Emit(ValueOpcode::StoreBufferU32x2, {f.Buffer(words), lane, Value(0u), Value(0u), pair, Value(true)},
+           f.AddMemory({.kind = ResourceKind::Buffer, .data_dwords = 2u, .idxen = true}, 0x18u));
+    f.PlanAndTrack();
+    return ExtractResourcePlan(f.program);
+  };
+  CheckFatal([&] { make(Key::Bypass); }, "not a valid runtime value",
+             "unchecked incoming lane borrowed the bound of another Phi arm");
+  TestMemory memory;
+  std::array<uint32_t, 3> data{uint32_t(memory.base), 0u, 0u};
+  SrtRuntime runtime{.user_data = data, .userdata = &memory, .read_specialization_memory = ReadTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  for (const auto kind : {Key::Carried, Key::Masked}) {
+    auto plan = make(kind);
+    for (auto count : {0u, 1u, UINT32_MAX}) {
+      data[2] = count;
+      memory.reads = 0u;
+      Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+                memory.reads == std::clamp(count, 1u, 2u),
+            "guarded lane key lost its zero row or read beyond its static range");
+    }
+  }
+}
+
 void TestPackedScalarBufferSelection() {
   const auto make = [](uint32_t shift_mask = 24u, bool cycle = false, uint32_t store_offset = 0u,
                        bool byte_store = false) {
@@ -7597,14 +7720,16 @@ void TestPackedScalarBufferSelection() {
   Check(materialize() && specialization == initial && memory.reads == 20u,
         "packed table refresh changed shader specialization or repeated scalar reads");
   memory.words[17] = 8u << 16u;
-  Check(!materialize(), "indexed DWORD write accepted an incompatible descriptor stride");
+  Check(materialize() && specialization != initial, "padded record stride was not specialized");
+  memory.words[17] = 6u << 16u;
+  Check(!materialize(), "indexed DWORD write accepted an unaligned record stride");
   memory.words[17] = 4u << 16u;
   memory.words[19] |= 3u << 28u;
   Check(!materialize(), "indexed DWORD write accepted raw byte bounds");
   for (auto bad : {0u, 1u, 2u}) {
-    auto invalid = make(bad == 0u ? 28u : 24u, bad == 1u, bad == 2u ? 4u : 0u);
+    auto invalid = make(bad == 0u ? 28u : 24u, bad == 1u, bad == 2u ? 2u : 0u);
     CheckFatal([&] { invalid->PlanAndTrack(); }, "not a valid runtime value",
-               "packed selector accepted a cross-byte shift, leafless cycle, or indexed byte offset");
+               "packed selector accepted a cross-byte shift, leafless cycle, or unaligned DWORD offset");
   }
   auto mixed = make(24u, false, 0u, true);
   mixed->PlanAndTrack();
@@ -9387,6 +9512,7 @@ int main() {
     Run("uniformized material image keys", TestUniformizedMaterialImageKeys);
     Run("indexed material image keys", TestIndexedMaterialImageKeys);
     Run("pointer-table indexed material keys", TestPointerTableIndexedMaterialKeys);
+    Run("guarded material image key", TestGuardedMaterialImageKey);
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("compact scalar image table", TestCompactScalarImageTable);
@@ -9408,6 +9534,7 @@ int main() {
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
     Run("GPU-selected formatted record store", TestGpuSelectedFormattedRecordStore);
     Run("finite buffer selection", TestFiniteBufferSelection);
+    Run("guarded carried buffer key", TestGuardedCarriedBufferKey);
     Run("packed scalar buffer selection", TestPackedScalarBufferSelection);
     Run("conditional sampler phi", TestConditionalSamplerPhi);
     Run("finite image phi cycle", TestFiniteImagePhiCycle);
