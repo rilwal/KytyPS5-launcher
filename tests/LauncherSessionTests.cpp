@@ -119,7 +119,10 @@ void TestSettings() {
 	      "a console language applies by name");
 	Check(Launcher::Settings::Apply(cfg, "console-language", "0").empty() && cfg.console_language == 0,
 	      "a console language applies by number");
-	Check(Launcher::Settings::Apply(cfg, "console-language", "30") != "",
+	Check(Launcher::Settings::Apply(cfg, "console-language", "Ukrainian").empty() &&
+	          cfg.console_language == 30,
+	      "the newest console language applies by name");
+	Check(Launcher::Settings::Apply(cfg, "console-language", "31") != "",
 	      "an unknown console language is refused");
 	Check(Launcher::Settings::Apply(cfg, "ps5-pro", "true").empty() && cfg.pro_enabled,
 	      "PS5 Pro mode applies");
