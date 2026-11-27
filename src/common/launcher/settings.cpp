@@ -89,11 +89,39 @@ constexpr std::array<std::string_view, 16> DLSS_PRESETS = {
 
 // By the console's language number (SceSystemParamLang)
 constexpr std::array<std::string_view, Config::MAX_CONSOLE_LANGUAGE + 1> LANGUAGES = {
-    "Japanese", "English (US)", "French", "Spanish", "German", "Italian", "Dutch",
-    "Portuguese (Portugal)", "Russian", "Korean", "Chinese (Traditional)", "Chinese (Simplified)",
-    "Finnish", "Swedish", "Danish", "Norwegian", "Polish", "Portuguese (Brazil)", "English (UK)",
-    "Turkish", "Spanish (Latin America)", "Arabic", "French (Canada)", "Czech", "Hungarian",
-    "Greek", "Romanian", "Thai", "Vietnamese", "Indonesian"};
+    "Japanese",
+    "English (US)",
+    "French",
+    "Spanish",
+    "German",
+    "Italian",
+    "Dutch",
+    "Portuguese (Portugal)",
+    "Russian",
+    "Korean",
+    "Chinese (Traditional)",
+    "Chinese (Simplified)",
+    "Finnish",
+    "Swedish",
+    "Danish",
+    "Norwegian",
+    "Polish",
+    "Portuguese (Brazil)",
+    "English (UK)",
+    "Turkish",
+    "Spanish (Latin America)",
+    "Arabic",
+    "French (Canada)",
+    "Czech",
+    "Hungarian",
+    "Greek",
+    "Romanian",
+    "Thai",
+    "Vietnamese",
+    "Indonesian",
+    "Ukrainian"};
+// Fails when upstream raises MAX_CONSOLE_LANGUAGE before a name is added here.
+static_assert(!LANGUAGES.back().empty(), "every console language needs a name");
 
 // The options worth a row in the launcher; debugging aids (dumps, validation, logs) are left out.
 // Those marked live change while a game runs (launcherMode.cpp); the rest wait for the next boot.
