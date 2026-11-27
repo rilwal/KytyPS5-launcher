@@ -85,16 +85,11 @@ struct MemoryInfo {
 	}
 
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
-		if (typed) return false;
 		if (data_bits == 8u) return !formatted && opcode == ValueOpcode::LoadBufferU8;
 		if (data_bits == 16u) return !formatted && opcode == ValueOpcode::LoadBufferU16;
-		return data_bits == 32u &&
-		       (formatted ? opcode == ValueOpcode::LoadBufferU32
-		                  : opcode == ValueOpcode::ReadConstBuffer ||
-		                        opcode == ValueOpcode::LoadBufferU32 ||
-		                        opcode == ValueOpcode::LoadBufferU32x2 ||
-		                        opcode == ValueOpcode::LoadBufferU32x3 ||
-		                        opcode == ValueOpcode::LoadBufferU32x4);
+		return data_bits == 32u && ((!formatted && opcode == ValueOpcode::ReadConstBuffer) ||
+		       opcode == ValueOpcode::LoadBufferU32 || opcode == ValueOpcode::LoadBufferU32x2 ||
+		       opcode == ValueOpcode::LoadBufferU32x3 || opcode == ValueOpcode::LoadBufferU32x4);
 	}
 
 	bool operator==(const MemoryInfo& other) const = default;
@@ -173,13 +168,20 @@ struct ImageResource {
 	bool operator==(const ImageResource& other) const = default;
 };
 
+[[nodiscard]] constexpr bool IsSupportedAtomicImageFormat(Prospero::BufferFormat format, bool wide) {
+	using F = Prospero::BufferFormat;
+	// An atomic treats one or two 32-bit channels as a single word regardless of their numeric type.
+	return wide ? format >= F::k32_32UInt && format <= F::k32_32Float
+	            : format >= F::k32UInt && format <= F::k32Float;
+}
+
 [[nodiscard]] constexpr Prospero::BufferFormat
 RawSignedStorageFormat(const ImageResource& image, Prospero::BufferFormat format) {
-	if (image.resource_class != ImageResourceClass::Storage || !image.written)
+	if (image.resource_class != ImageResourceClass::Storage || !image.written || image.read || image.atomic)
 		return Prospero::BufferFormat::kInvalid;
-	if (format == Prospero::BufferFormat::k32SInt && (image.atomic ? !image.atomic64 : !image.read))
+	if (format == Prospero::BufferFormat::k32SInt)
 		return Prospero::BufferFormat::k32UInt;
-	if (format == Prospero::BufferFormat::k16SInt && !image.read && !image.atomic)
+	if (format == Prospero::BufferFormat::k16SInt)
 		return Prospero::BufferFormat::k16UInt;
 	return Prospero::BufferFormat::kInvalid;
 }
@@ -770,7 +772,6 @@ struct Program: ResourcePlan {
 uint32_t StorageBufferElementBits(const Program& program, const MemoryInfo& memory);
 
 std::string ProgramToString(const Program& program);
-bool        HasShaderMemoryWrites(const Program& program);
 
 void  ValidateProgram(const Program& program);
 bool  EquivalentValue(const ResourcePlan& program, Value left, Value right);
